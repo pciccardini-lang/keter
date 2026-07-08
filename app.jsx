@@ -58,6 +58,7 @@ function FieldText({ text }) {
       dir={heb ? 'rtl' : 'ltr'}
       style={{
         fontFamily: heb ? "'Frank Ruhl Libre', 'David Libre', serif" : "'Cormorant Garamond', Georgia, serif",
+        fontWeight: heb ? 400 : 500,
         whiteSpace: 'pre-wrap',
         lineHeight: 1.6,
       }}
@@ -1205,11 +1206,11 @@ function Keter() {
                 }}
               >
                 <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontSize: 18 }}>
+                  <div style={{ fontSize: 21, fontWeight: 500 }}>
                     <FieldText text={e.Parola} />
                   </div>
                   {e.Traduzione && (
-                    <div style={{ fontSize: 14, color: '#6a5c42', marginTop: 3 }}>
+                    <div style={{ fontSize: 16, color: '#574a34', marginTop: 4 }}>
                       <FieldText text={e.Traduzione} />
                     </div>
                   )}
@@ -1593,7 +1594,7 @@ function Keter() {
               </button>
             </div>
 
-            <div style={{ fontSize: 26, marginBottom: 4 }}>
+            <div style={{ fontSize: 30, marginBottom: 6 }}>
               {editing ? (
                 <input
                   value={draft.Parola || ''}
@@ -1615,7 +1616,7 @@ function Keter() {
               )}
             </div>
 
-            <div style={{ fontSize: 17, color: '#8a2433', marginBottom: 18 }}>
+            <div style={{ fontSize: 19, color: '#8a2433', marginBottom: 18 }}>
               {editing ? (
                 <input
                   value={draft.Traduzione || ''}
@@ -1674,7 +1675,7 @@ function Keter() {
                       }}
                     />
                   ) : (
-                    <div style={{ fontSize: 15, color: '#4a3f2c' }}>
+                    <div style={{ fontSize: 16.5, color: '#4a3f2c' }}>
                       <FieldText text={value} />
                     </div>
                   )}
@@ -2664,10 +2665,10 @@ function Keter() {
                       cursor: 'pointer',
                     }}
                   >
-                    <div dir="rtl" style={{ fontSize: 18, fontFamily: "'Frank Ruhl Libre', serif", color: '#2b2318', flexShrink: 0 }}>
+                    <div dir="rtl" style={{ fontSize: 20, fontWeight: 500, fontFamily: "'Frank Ruhl Libre', serif", color: '#2b2318', flexShrink: 0 }}>
                       {e.Parola}
                     </div>
-                    <div style={{ flex: 1, fontSize: 13, color: '#4a3f2c', fontFamily: "'Inter', sans-serif", minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    <div style={{ flex: 1, fontSize: 14, color: '#4a3f2c', fontFamily: "'Inter', sans-serif", minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                       {e.Traduzione || ''}
                     </div>
                     <ChevronRight size={15} color="#8a6d3a" style={{ flexShrink: 0 }} />
