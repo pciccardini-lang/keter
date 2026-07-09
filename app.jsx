@@ -27,6 +27,50 @@ function normalizeHebrew(s) {
   return normalizeHebrewWithMap(s).norm;
 }
 
+// ---------- Pubblicazione su GitHub ----------
+const GH_OWNER = 'pciccardini-lang';
+const GH_REPO = 'keter';
+const GH_FILE = 'modifiche.json';
+const GH_BRANCH = 'main';
+
+// Base64 <-> UTF-8 (necessario per l'ebraico nei contenuti dell'API GitHub)
+function b64EncodeUtf8(str) {
+  const bytes = new TextEncoder().encode(str);
+  let bin = '';
+  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+  return btoa(bin);
+}
+
+function b64DecodeUtf8(b64) {
+  const bin = atob((b64 || '').replace(/\s/g, ''));
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return new TextDecoder().decode(bytes);
+}
+
+// Applica una mappa di modifiche { id: voce } a una lista di voci:
+// aggiorna quelle esistenti e AGGIUNGE quelle nuove (create dall'app).
+function applyEditsToEntries(base, editsMap) {
+  if (!editsMap || typeof editsMap !== 'object') return base;
+  const next = base.map((e) => (editsMap[e.id] ? { ...e, ...editsMap[e.id] } : e));
+  const existingIds = new Set(base.map((e) => String(e.id)));
+  Object.values(editsMap).forEach((e) => {
+    if (e && e.id !== undefined && !existingIds.has(String(e.id))) next.push(e);
+  });
+  return next;
+}
+
+// Fonde una lista di testi in una lista base: aggiorna per id, aggiunge i nuovi.
+function mergeTextsList(base, list) {
+  if (!Array.isArray(list) || !list.length) return base;
+  const ids = new Set(base.map((t) => t.id));
+  const updated = base.map((t) => {
+    const found = list.find((x) => x && x.id === t.id);
+    return found ? { ...t, ...found } : t;
+  });
+  return updated.concat(list.filter((x) => x && x.id !== undefined && !ids.has(x.id)));
+}
+
 const KETER_DATA = window.KETER_DATA;
 
 
@@ -58,7 +102,6 @@ function FieldText({ text }) {
       dir={heb ? 'rtl' : 'ltr'}
       style={{
         fontFamily: heb ? "'Frank Ruhl Libre', 'David Libre', serif" : "'Cormorant Garamond', Georgia, serif",
-        fontWeight: heb ? 400 : 500,
         whiteSpace: 'pre-wrap',
         lineHeight: 1.6,
       }}
@@ -83,6 +126,8 @@ function Keter() {
   const [editsImportText, setEditsImportText] = useState('');
   const [editsImportError, setEditsImportError] = useState('');
   const [editsCopied, setEditsCopied] = useState(false);
+  const [publishState, setPublishState] = useState('idle'); // idle | publishing | published | error
+  const [publishError, setPublishError] = useState('');
 
   const [articles, setArticles] = useState(ARTICLES_SEED);
   const [articleQuery, setArticleQuery] = useState('');
@@ -109,21 +154,48 @@ function Keter() {
   const [readerSearchOpen, setReaderSearchOpen] = useState(false);
   const [readerQuery, setReaderQuery] = useState('');
 
+  // Caricamento iniziale: modifiche pubblicate (modifiche.json su GitHub Pages)
+  // + salvataggi locali del dispositivo, in quest'ordine (le locali vincono).
   useEffect(() => {
     (async () => {
+      // 1. modifiche pubblicate (il file può non esistere ancora: nessun problema)
+      let published = null;
       try {
-        const result = await window.storage.get('keter-edits', false);
-        if (result && result.value) {
-          const edits = JSON.parse(result.value);
-          setEntries((base) =>
-            base.map((e) => (edits[e.id] ? { ...e, ...edits[e.id] } : e))
-          );
-        }
+        const resp = await fetch('./' + GH_FILE + '?v=' + Date.now(), { cache: 'no-store' });
+        if (resp.ok) published = await resp.json();
       } catch (err) {
-        // no saved edits yet
-      } finally {
-        setLoaded(true);
+        // offline, o file non ancora creato
       }
+      // 2. modifiche locali del dispositivo
+      let localEdits = {};
+      try {
+        const r = await window.storage.get('keter-edits', false);
+        if (r && r.value) localEdits = JSON.parse(r.value);
+      } catch (err) {
+        localEdits = {};
+      }
+      let localTexts = null;
+      try {
+        const r = await window.storage.get('keter-texts', false);
+        if (r && r.value) localTexts = JSON.parse(r.value);
+      } catch (err) {
+        localTexts = null;
+      }
+      // 3. lessico: dati base -> pubblicate -> locali
+      setEntries((base) => {
+        let next = base;
+        if (published && published.lessico) next = applyEditsToEntries(next, published.lessico);
+        if (localEdits && Object.keys(localEdits).length) next = applyEditsToEntries(next, localEdits);
+        return next;
+      });
+      // 4. testi: seed -> pubblicati -> locali
+      setTexts(() => {
+        let next = TEXTS_SEED;
+        if (published && Array.isArray(published.testi)) next = mergeTextsList(next, published.testi);
+        if (Array.isArray(localTexts)) next = mergeTextsList(next, localTexts);
+        return next;
+      });
+      setLoaded(true);
     })();
   }, []);
 
@@ -146,25 +218,6 @@ function Keter() {
     })();
   }, []);
 
-  useEffect(() => {
-    (async () => {
-      try {
-        const result = await window.storage.get('keter-texts', false);
-        if (result && result.value) {
-          const saved = JSON.parse(result.value);
-          const seedIds = new Set(TEXTS_SEED.map((t) => t.id));
-          const overrides = saved.filter((t) => seedIds.has(t.id));
-          const custom = saved.filter((t) => !seedIds.has(t.id));
-          setTexts(
-            TEXTS_SEED.map((t) => overrides.find((o) => o.id === t.id) || t).concat(custom)
-          );
-        }
-      } catch (err) {
-        // nessun testo salvato ancora
-      }
-    })();
-  }, []);
-
   const tags = useMemo(() => {
     const set = new Set();
     entries.forEach((e) => {
@@ -175,7 +228,7 @@ function Keter() {
 
   const tagColor = useCallback((tag) => {
     if (!tag) return '#8a8a8a';
-    const palette = ['#8a6d1f', '#57742e', '#8a4f2e', '#3f5a85', '#8a3a63', '#a3641f'];
+    const palette = ['#c9a24b', '#8fae7d', '#a3714f', '#7b8fae', '#b06a8f', '#c98f4b'];
     let hash = 0;
     for (let i = 0; i < tag.length; i++) hash = tag.charCodeAt(i) + ((hash << 5) - hash);
     return palette[Math.abs(hash) % palette.length];
@@ -216,10 +269,37 @@ function Keter() {
     setEditing(true);
   };
 
+  // Crea una voce nuova del Lessico, aperta direttamente in modifica.
+  const newEntry = () => {
+    const draft = {
+      id: 'v-' + Date.now(),
+      Parola: '',
+      Traduzione: '',
+      Definizione: '',
+      Coniugazione: '',
+      Declinazioni: '',
+      Esempi: '',
+      Citazione: '',
+      Tag: '',
+    };
+    setSelected(draft);
+    setDraft(draft);
+    setEditing(true);
+  };
+
   const saveEdit = async () => {
-    // 1. Applica SEMPRE la modifica allo stato locale, subito.
     const saved = { ...draft };
-    setEntries((base) => base.map((e) => (e.id === saved.id ? saved : e)));
+    if (!(saved.Parola || '').trim() && !(saved.Traduzione || '').trim()) {
+      window.alert('Inserisci almeno la parola o la traduzione prima di salvare.');
+      return;
+    }
+    // 1. Applica SEMPRE la modifica allo stato locale, subito.
+    //    Se la voce è nuova, viene aggiunta alla lista.
+    setEntries((base) =>
+      base.some((e) => e.id === saved.id)
+        ? base.map((e) => (e.id === saved.id ? saved : e))
+        : [...base, saved]
+    );
     setSelected(saved);
     setSessionEdits((prev) => ({ ...prev, [saved.id]: saved }));
     setEditing(false);
@@ -247,20 +327,12 @@ function Keter() {
   };
 
   const applyEditsMap = (edits) => {
-    setEntries((base) => base.map((e) => (edits[e.id] ? { ...e, ...edits[e.id] } : e)));
+    setEntries((base) => applyEditsToEntries(base, edits));
     setSessionEdits((prev) => ({ ...prev, ...edits }));
   };
 
   const applyTextsList = (list) => {
-    setTexts((base) => {
-      const ids = new Set(base.map((t) => t.id));
-      const updatedBase = base.map((t) => {
-        const found = list.find((x) => x.id === t.id);
-        return found ? { ...t, ...found } : t;
-      });
-      const added = list.filter((x) => !ids.has(x.id));
-      return updatedBase.concat(added);
-    });
+    setTexts((base) => mergeTextsList(base, list));
     setSessionTexts((prev) => {
       const next = { ...prev };
       list.forEach((t) => {
@@ -308,6 +380,91 @@ function Keter() {
       setTimeout(() => setEditsCopied(false), 2000);
     } catch (err) {
       // fallback: l'utente può selezionare e copiare dal textarea
+    }
+  };
+
+  // ---------- Pubblicazione su GitHub ----------
+
+  // Recupera (o chiede) il token personale GitHub, salvato solo sul dispositivo.
+  const getGithubToken = (forceAsk = false) => {
+    let token = '';
+    try { token = localStorage.getItem('keter-github-token') || ''; } catch (e) {}
+    if (!token || forceAsk) {
+      token = (window.prompt(
+        "Per pubblicare serve un token personale GitHub (fine-grained) con permesso Contents: Read and write sul repository keter.\nSi crea su github.com \u2192 Settings \u2192 Developer settings \u2192 Personal access tokens.\nVerr\u00e0 salvato solo su questo dispositivo."
+      ) || '').trim();
+      if (token) { try { localStorage.setItem('keter-github-token', token); } catch (e) {} }
+    }
+    return token;
+  };
+
+  // Pubblica le modifiche in sospeso nel file modifiche.json del repository.
+  // Il file viene creato automaticamente alla prima pubblicazione.
+  const publishToGithub = async () => {
+    if (!pendingCount) return;
+    const token = getGithubToken();
+    if (!token) return;
+    setPublishState('publishing');
+    setPublishError('');
+    try {
+      const apiUrl = `https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/contents/${GH_FILE}`;
+      const headers = {
+        Authorization: 'Bearer ' + token,
+        Accept: 'application/vnd.github+json',
+      };
+      // 1. Legge la versione corrente del file (sha + contenuto), se esiste.
+      let sha = null;
+      let remote = { lessico: {}, testi: [] };
+      const getResp = await fetch(apiUrl + '?ref=' + GH_BRANCH + '&t=' + Date.now(), { headers });
+      if (getResp.status === 200) {
+        const info = await getResp.json();
+        sha = info.sha;
+        try {
+          const parsed = JSON.parse(b64DecodeUtf8(info.content));
+          if (parsed && typeof parsed === 'object') {
+            remote.lessico = parsed.lessico || {};
+            remote.testi = Array.isArray(parsed.testi) ? parsed.testi : [];
+          }
+        } catch (e) {
+          // contenuto illeggibile: verrà riscritto da zero
+        }
+      } else if (getResp.status === 401 || getResp.status === 403) {
+        try { localStorage.removeItem('keter-github-token'); } catch (e) {}
+        throw new Error('token non valido o scaduto — riprova e ti verrà richiesto di nuovo');
+      } else if (getResp.status !== 404) {
+        throw new Error('lettura da GitHub fallita (HTTP ' + getResp.status + ')');
+      }
+      // 2. Fonde le modifiche remote già pubblicate con quelle locali in sospeso.
+      const mergedLessico = { ...remote.lessico, ...sessionEdits };
+      const textMap = new Map(remote.testi.filter((t) => t && t.id !== undefined).map((t) => [t.id, t]));
+      Object.values(sessionTexts).forEach((t) => { if (t && t.id !== undefined) textMap.set(t.id, t); });
+      const merged = { lessico: mergedLessico, testi: Array.from(textMap.values()) };
+      // 3. Scrive il file aggiornato (lo crea se non esiste).
+      const putResp = await fetch(apiUrl, {
+        method: 'PUT',
+        headers: { ...headers, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          message: 'Keter: pubblicazione modifiche dall\u2019app',
+          content: b64EncodeUtf8(JSON.stringify(merged, null, 2)),
+          branch: GH_BRANCH,
+          ...(sha ? { sha } : {}),
+        }),
+      });
+      if (!putResp.ok) {
+        if (putResp.status === 401 || putResp.status === 403) {
+          try { localStorage.removeItem('keter-github-token'); } catch (e) {}
+          throw new Error('token non valido o senza permessi di scrittura — riprova e ti verrà richiesto di nuovo');
+        }
+        if (putResp.status === 409) throw new Error('conflitto di versione: riprova tra qualche secondo');
+        throw new Error('scrittura su GitHub fallita (HTTP ' + putResp.status + ')');
+      }
+      setSessionEdits({});
+      setSessionTexts({});
+      setPublishState('published');
+      setTimeout(() => setPublishState('idle'), 5000);
+    } catch (err) {
+      setPublishState('error');
+      setPublishError(err.message || 'errore sconosciuto');
     }
   };
 
@@ -686,7 +843,7 @@ function Keter() {
             fontFamily: "'Frank Ruhl Libre', serif",
             fontSize: 20,
             lineHeight: 2,
-            color: '#2b2318',
+            color: '#f0e4c8',
             textAlign: 'right',
           }}
         >
@@ -704,24 +861,24 @@ function Keter() {
                   ...(highlighted
                     ? {
                         cursor: 'pointer',
-                        color: '#7a1f2b',
-                        borderBottom: '1px solid #8a2433',
+                        color: '#e9c97a',
+                        borderBottom: '1px solid #c9a24b',
                         paddingBottom: 1,
                       }
                     : {
                         cursor: 'pointer',
-                        borderBottom: '1px dotted #b39c6488',
+                        borderBottom: '1px dotted #67a37788',
                         paddingBottom: 1,
                       }),
                   ...(searchHit
                     ? {
-                        background: '#7a1f2b',
-                        color: '#f9efd7',
+                        background: '#e9c97a',
+                        color: '#1c1408',
                         fontWeight: 700,
                         borderRadius: 4,
                         padding: '0 4px',
-                        borderBottom: '2px solid #8a2433',
-                        boxShadow: '0 0 6px #7a1f2b88',
+                        borderBottom: '2px solid #c9a24b',
+                        boxShadow: '0 0 6px #e9c97a88',
                       }
                     : {}),
                 }}
@@ -882,20 +1039,20 @@ function Keter() {
     <div
       style={{
         minHeight: '100vh',
-        background: 'radial-gradient(ellipse at top, #f9f4e6 0%, #f5efe0 55%, #ece0c4 100%)',
-        color: '#33291a',
+        background: 'radial-gradient(ellipse at top, #336646 0%, #3a6647 55%, #213a28 100%)',
+        color: '#ece4d3',
         fontFamily: "'Cormorant Garamond', Georgia, serif",
       }}
     >
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=Frank+Ruhl+Libre:wght@400;500;700&family=Cormorant+Garamond:ital,wght@0,400;0,500;0,600;1,400&family=Inter:wght@400;500;600&display=swap');
         * { box-sizing: border-box; }
-        ::selection { background: #8a243355; }
+        ::selection { background: #c9a24b55; }
         .keter-scroll::-webkit-scrollbar { width: 8px; }
-        .keter-scroll::-webkit-scrollbar-thumb { background: #cbb98e; border-radius: 4px; }
+        .keter-scroll::-webkit-scrollbar-thumb { background: #6ba57a; border-radius: 4px; }
         .keter-scroll::-webkit-scrollbar-track { background: transparent; }
         button:focus-visible, input:focus-visible, textarea:focus-visible {
-          outline: 2px solid #8a2433;
+          outline: 2px solid #c9a24b;
           outline-offset: 2px;
         }
         @media (prefers-reduced-motion: reduce) {
@@ -909,14 +1066,14 @@ function Keter() {
           position: 'sticky',
           top: 0,
           zIndex: 20,
-          background: 'linear-gradient(180deg, #f5efe0 0%, #f5efe0ee 85%, transparent)',
+          background: 'linear-gradient(180deg, #3a6647 0%, #3a6647ee 85%, transparent)',
           backdropFilter: 'blur(6px)',
-          borderBottom: '1px solid #d9cbaa',
+          borderBottom: '1px solid #487d58',
           padding: '18px 20px 14px',
         }}
       >
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 14 }}>
-          <Crown size={22} color="#8a2433" strokeWidth={1.5} />
+          <Crown size={22} color="#c9a24b" strokeWidth={1.5} />
           <h1
             style={{
               margin: 0,
@@ -924,23 +1081,23 @@ function Keter() {
               fontWeight: 700,
               fontSize: 24,
               letterSpacing: 0.5,
-              color: '#2b2318',
+              color: '#f0e4c8',
             }}
           >
-            Keter <span style={{ color: '#8a2433', fontSize: 18 }}>כֶּתֶר</span>
+            Keter <span style={{ color: '#c9a24b', fontSize: 18 }}>כֶּתֶר</span>
           </h1>
-          <span style={{ marginLeft: 'auto', fontSize: 13, color: '#857659', fontFamily: "'Inter', sans-serif" }}>
+          <span style={{ marginLeft: 'auto', fontSize: 13, color: '#8a7f68', fontFamily: "'Inter', sans-serif" }}>
             {view === 'lexicon' ? `${filtered.length} / ${entries.length}` : view === 'articles' ? `${filteredArticles.length} / ${articles.length}` : `${filteredTexts.length} testi`}
           </span>
           <button
             onClick={() => setEditsPanel('export')}
-            aria-label="Esporta modifiche"
+            aria-label="Pubblica o esporta modifiche"
             style={{
               position: 'relative',
               background: 'none',
-              border: '1px solid #d9cbaa',
+              border: '1px solid #487d58',
               borderRadius: 8,
-              color: pendingCount ? '#7a1f2b' : '#857659',
+              color: pendingCount ? '#e9c97a' : '#8a7f68',
               padding: '5px 7px',
               cursor: 'pointer',
               display: 'flex',
@@ -954,8 +1111,8 @@ function Keter() {
                   position: 'absolute',
                   top: -6,
                   right: -6,
-                  background: '#8a2433',
-                  color: '#f9efd7',
+                  background: '#c9a24b',
+                  color: '#1a2b20',
                   borderRadius: 999,
                   fontSize: 10,
                   fontWeight: 700,
@@ -976,9 +1133,9 @@ function Keter() {
             aria-label="Importa modifiche"
             style={{
               background: 'none',
-              border: '1px solid #d9cbaa',
+              border: '1px solid #487d58',
               borderRadius: 8,
-              color: '#857659',
+              color: '#8a7f68',
               padding: '5px 7px',
               cursor: 'pointer',
               display: 'flex',
@@ -1009,9 +1166,9 @@ function Keter() {
                 fontSize: 12,
                 padding: '8px 4px',
                 borderRadius: 8,
-                border: `1px solid ${view === id ? '#8a2433' : '#cdbc96'}`,
-                background: view === id ? '#8a243322' : 'transparent',
-                color: view === id ? '#7a1f2b' : '#6a5c42',
+                border: `1px solid ${view === id ? '#c9a24b' : '#67a377'}`,
+                background: view === id ? '#c9a24b22' : 'transparent',
+                color: view === id ? '#e9c97a' : '#a89c81',
                 cursor: 'pointer',
                 whiteSpace: 'nowrap',
               }}
@@ -1027,13 +1184,13 @@ function Keter() {
             display: 'flex',
             alignItems: 'center',
             gap: 8,
-            background: '#fdf8ea',
-            border: '1px solid #cdbc96',
+            background: '#2d5c3c',
+            border: '1px solid #67a377',
             borderRadius: 10,
             padding: '9px 12px',
           }}
         >
-          <Search size={16} color="#857659" />
+          <Search size={16} color="#8a7f68" />
           <input
             value={query}
             onChange={(e) => setQuery(e.target.value)}
@@ -1042,7 +1199,7 @@ function Keter() {
               flex: 1,
               background: 'transparent',
               border: 'none',
-              color: '#33291a',
+              color: '#ece4d3',
               fontSize: 15,
               fontFamily: "'Inter', sans-serif",
             }}
@@ -1050,7 +1207,7 @@ function Keter() {
           {query && (
             <button
               onClick={() => setQuery('')}
-              style={{ background: 'none', border: 'none', color: '#857659', cursor: 'pointer', padding: 2 }}
+              style={{ background: 'none', border: 'none', color: '#8a7f68', cursor: 'pointer', padding: 2 }}
               aria-label="Cancella ricerca"
             >
               <X size={15} />
@@ -1068,9 +1225,9 @@ function Keter() {
                 fontSize: 12,
                 padding: '5px 11px',
                 borderRadius: 999,
-                border: `1px solid ${activeTag === 'all' ? '#8a2433' : '#cdbc96'}`,
-                background: activeTag === 'all' ? '#8a243322' : 'transparent',
-                color: activeTag === 'all' ? '#7a1f2b' : '#857659',
+                border: `1px solid ${activeTag === 'all' ? '#c9a24b' : '#67a377'}`,
+                background: activeTag === 'all' ? '#c9a24b22' : 'transparent',
+                color: activeTag === 'all' ? '#e9c97a' : '#8a7f68',
                 whiteSpace: 'nowrap',
                 cursor: 'pointer',
               }}
@@ -1086,9 +1243,9 @@ function Keter() {
                   fontSize: 12,
                   padding: '5px 11px',
                   borderRadius: 999,
-                  border: `1px solid ${activeTag === t ? tagColor(t) : '#cdbc96'}`,
+                  border: `1px solid ${activeTag === t ? tagColor(t) : '#67a377'}`,
                   background: activeTag === t ? tagColor(t) + '22' : 'transparent',
-                  color: activeTag === t ? tagColor(t) : '#857659',
+                  color: activeTag === t ? tagColor(t) : '#8a7f68',
                   whiteSpace: 'nowrap',
                   cursor: 'pointer',
                 }}
@@ -1105,13 +1262,13 @@ function Keter() {
               display: 'flex',
               alignItems: 'center',
               gap: 8,
-              background: '#fdf8ea',
-              border: '1px solid #cdbc96',
+              background: '#2d5c3c',
+              border: '1px solid #67a377',
               borderRadius: 10,
               padding: '9px 12px',
             }}
           >
-            <Search size={16} color="#857659" />
+            <Search size={16} color="#8a7f68" />
             <input
               value={articleQuery}
               onChange={(e) => setArticleQuery(e.target.value)}
@@ -1120,7 +1277,7 @@ function Keter() {
                 flex: 1,
                 background: 'transparent',
                 border: 'none',
-                color: '#33291a',
+                color: '#ece4d3',
                 fontSize: 15,
                 fontFamily: "'Inter', sans-serif",
               }}
@@ -1128,7 +1285,7 @@ function Keter() {
             {articleQuery && (
               <button
                 onClick={() => setArticleQuery('')}
-                style={{ background: 'none', border: 'none', color: '#857659', cursor: 'pointer', padding: 2 }}
+                style={{ background: 'none', border: 'none', color: '#8a7f68', cursor: 'pointer', padding: 2 }}
                 aria-label="Cancella ricerca"
               >
                 <X size={15} />
@@ -1143,13 +1300,13 @@ function Keter() {
               display: 'flex',
               alignItems: 'center',
               gap: 8,
-              background: '#fdf8ea',
-              border: '1px solid #cdbc96',
+              background: '#2d5c3c',
+              border: '1px solid #67a377',
               borderRadius: 10,
               padding: '9px 12px',
             }}
           >
-            <Search size={16} color="#857659" />
+            <Search size={16} color="#8a7f68" />
             <input
               value={textQuery}
               onChange={(e) => setTextQuery(e.target.value)}
@@ -1158,7 +1315,7 @@ function Keter() {
                 flex: 1,
                 background: 'transparent',
                 border: 'none',
-                color: '#33291a',
+                color: '#ece4d3',
                 fontSize: 15,
                 fontFamily: "'Inter', sans-serif",
               }}
@@ -1166,7 +1323,7 @@ function Keter() {
             {textQuery && (
               <button
                 onClick={() => setTextQuery('')}
-                style={{ background: 'none', border: 'none', color: '#857659', cursor: 'pointer', padding: 2 }}
+                style={{ background: 'none', border: 'none', color: '#8a7f68', cursor: 'pointer', padding: 2 }}
                 aria-label="Cancella ricerca"
               >
                 <X size={15} />
@@ -1180,63 +1337,87 @@ function Keter() {
       <main style={{ padding: '14px 16px 60px', maxWidth: 720, margin: '0 auto' }}>
         {view === 'lexicon' ? (
         !loaded ? (
-          <div style={{ textAlign: 'center', padding: 60, color: '#9a8c70', fontFamily: "'Inter', sans-serif" }}>
+          <div style={{ textAlign: 'center', padding: 60, color: '#6b6250', fontFamily: "'Inter', sans-serif" }}>
             Caricamento del lessico…
-          </div>
-        ) : filtered.length === 0 ? (
-          <div style={{ textAlign: 'center', padding: 60, color: '#9a8c70', fontFamily: "'Inter', sans-serif" }}>
-            Nessuna voce trovata. Prova un'altra ricerca.
           </div>
         ) : (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-            {filtered.slice(0, 400).map((e) => (
-              <button
-                key={e.id}
-                onClick={() => openEntry(e)}
-                style={{
-                  textAlign: 'left',
-                  background: '#fffdf6',
-                  border: '1px solid #e0d4b6',
-                  borderRadius: 10,
-                  padding: '13px 14px',
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: 12,
-                  cursor: 'pointer',
-                }}
-              >
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontSize: 21, fontWeight: 500 }}>
-                    <FieldText text={e.Parola} />
-                  </div>
-                  {e.Traduzione && (
-                    <div style={{ fontSize: 16, color: '#574a34', marginTop: 4 }}>
-                      <FieldText text={e.Traduzione} />
-                    </div>
-                  )}
-                </div>
-                {e.Tag && (
-                  <span
+            <button
+              onClick={newEntry}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: 6,
+                background: 'transparent',
+                border: '1px dashed #67a377',
+                borderRadius: 10,
+                padding: '11px 14px',
+                color: '#96c4a0',
+                fontFamily: "'Inter', sans-serif",
+                fontSize: 13,
+                cursor: 'pointer',
+              }}
+            >
+              <Plus size={14} /> Nuova voce
+            </button>
+
+            {filtered.length === 0 ? (
+              <div style={{ textAlign: 'center', padding: 60, color: '#6b6250', fontFamily: "'Inter', sans-serif" }}>
+                Nessuna voce trovata. Prova un'altra ricerca.
+              </div>
+            ) : (
+              <>
+                {filtered.slice(0, 400).map((e) => (
+                  <button
+                    key={e.id}
+                    onClick={() => openEntry(e)}
                     style={{
-                      fontFamily: "'Inter', sans-serif",
-                      fontSize: 10,
-                      padding: '3px 8px',
-                      borderRadius: 999,
-                      border: `1px solid ${tagColor(e.Tag.trim())}66`,
-                      color: tagColor(e.Tag.trim()),
-                      whiteSpace: 'nowrap',
+                      textAlign: 'left',
+                      background: '#28442a',
+                      border: '1px solid #457a54',
+                      borderRadius: 10,
+                      padding: '13px 14px',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 12,
+                      cursor: 'pointer',
                     }}
                   >
-                    {e.Tag.trim()}
-                  </span>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: 18 }}>
+                        <FieldText text={e.Parola} />
+                      </div>
+                      {e.Traduzione && (
+                        <div style={{ fontSize: 14, color: '#a89c81', marginTop: 3 }}>
+                          <FieldText text={e.Traduzione} />
+                        </div>
+                      )}
+                    </div>
+                    {e.Tag && (
+                      <span
+                        style={{
+                          fontFamily: "'Inter', sans-serif",
+                          fontSize: 10,
+                          padding: '3px 8px',
+                          borderRadius: 999,
+                          border: `1px solid ${tagColor(e.Tag.trim())}66`,
+                          color: tagColor(e.Tag.trim()),
+                          whiteSpace: 'nowrap',
+                        }}
+                      >
+                        {e.Tag.trim()}
+                      </span>
+                    )}
+                    <ChevronRight size={16} color="#96c4a0" style={{ flexShrink: 0 }} />
+                  </button>
+                ))}
+                {filtered.length > 400 && (
+                  <div style={{ textAlign: 'center', padding: '14px 0', color: '#6b6250', fontSize: 13, fontFamily: "'Inter', sans-serif" }}>
+                    Mostrando le prime 400 di {filtered.length} voci — affina la ricerca per vedere il resto.
+                  </div>
                 )}
-                <ChevronRight size={16} color="#8a6d3a" style={{ flexShrink: 0 }} />
-              </button>
-            ))}
-            {filtered.length > 400 && (
-              <div style={{ textAlign: 'center', padding: '14px 0', color: '#9a8c70', fontSize: 13, fontFamily: "'Inter', sans-serif" }}>
-                Mostrando le prime 400 di {filtered.length} voci — affina la ricerca per vedere il resto.
-              </div>
+              </>
             )}
           </div>
         )
@@ -1252,10 +1433,10 @@ function Keter() {
                   justifyContent: 'center',
                   gap: 6,
                   background: 'transparent',
-                  border: '1px dashed #cdbc96',
+                  border: '1px dashed #67a377',
                   borderRadius: 10,
                   padding: '11px 14px',
-                  color: '#8a6d3a',
+                  color: '#96c4a0',
                   fontFamily: "'Inter', sans-serif",
                   fontSize: 13,
                   cursor: 'pointer',
@@ -1271,10 +1452,10 @@ function Keter() {
                   justifyContent: 'center',
                   gap: 6,
                   background: 'transparent',
-                  border: '1px dashed #cdbc96',
+                  border: '1px dashed #67a377',
                   borderRadius: 10,
                   padding: '11px 14px',
-                  color: '#8a6d3a',
+                  color: '#96c4a0',
                   fontFamily: "'Inter', sans-serif",
                   fontSize: 13,
                   cursor: 'pointer',
@@ -1285,7 +1466,7 @@ function Keter() {
             </div>
 
             {filteredArticles.length === 0 ? (
-              <div style={{ textAlign: 'center', padding: 60, color: '#9a8c70', fontFamily: "'Inter', sans-serif" }}>
+              <div style={{ textAlign: 'center', padding: 60, color: '#6b6250', fontFamily: "'Inter', sans-serif" }}>
                 Nessun articolo trovato.
               </div>
             ) : (
@@ -1295,8 +1476,8 @@ function Keter() {
                   onClick={() => openArticle(a)}
                   style={{
                     textAlign: 'left',
-                    background: '#fffdf6',
-                    border: '1px solid #e0d4b6',
+                    background: '#28442a',
+                    border: '1px solid #457a54',
                     borderRadius: 10,
                     padding: '14px 16px',
                     display: 'flex',
@@ -1306,21 +1487,21 @@ function Keter() {
                   }}
                 >
                   <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
-                    <BookOpen size={16} color="#8a2433" style={{ marginTop: 3, flexShrink: 0 }} />
+                    <BookOpen size={16} color="#c9a24b" style={{ marginTop: 3, flexShrink: 0 }} />
                     <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ fontSize: 16, fontFamily: "'Frank Ruhl Libre', serif", color: '#2b2318' }}>
+                      <div style={{ fontSize: 16, fontFamily: "'Frank Ruhl Libre', serif", color: '#f0e4c8' }}>
                         {a.title || 'Senza titolo'}
                       </div>
                       {a.source && (
-                        <div style={{ fontSize: 12, color: '#857659', marginTop: 2, fontFamily: "'Inter', sans-serif" }}>
+                        <div style={{ fontSize: 12, color: '#8a7f68', marginTop: 2, fontFamily: "'Inter', sans-serif" }}>
                           {a.source}
                         </div>
                       )}
                     </div>
-                    <ChevronRight size={16} color="#8a6d3a" style={{ flexShrink: 0, marginTop: 3 }} />
+                    <ChevronRight size={16} color="#96c4a0" style={{ flexShrink: 0, marginTop: 3 }} />
                   </div>
                   {a.body && (
-                    <div style={{ fontSize: 13, color: '#4a3f2c', lineHeight: 1.5, marginLeft: 26 }}>
+                    <div style={{ fontSize: 13, color: '#cfc4a8', lineHeight: 1.5, marginLeft: 26 }}>
                       {a.body.slice(0, 130).trim()}{a.body.length > 130 ? '…' : ''}
                     </div>
                   )}
@@ -1334,8 +1515,8 @@ function Keter() {
                             fontSize: 10,
                             padding: '2px 8px',
                             borderRadius: 999,
-                            border: '1px solid #cdbc9666',
-                            color: '#8a6d3a',
+                            border: '1px solid #67a37766',
+                            color: '#96c4a0',
                           }}
                         >
                           {t}
@@ -1357,10 +1538,10 @@ function Keter() {
                 justifyContent: 'center',
                 gap: 6,
                 background: 'transparent',
-                border: '1px dashed #cdbc96',
+                border: '1px dashed #67a377',
                 borderRadius: 10,
                 padding: '11px 14px',
-                color: '#8a6d3a',
+                color: '#96c4a0',
                 fontFamily: "'Inter', sans-serif",
                 fontSize: 13,
                 cursor: 'pointer',
@@ -1370,7 +1551,7 @@ function Keter() {
             </button>
 
             {filteredTexts.length === 0 ? (
-              <div style={{ textAlign: 'center', padding: 60, color: '#9a8c70', fontFamily: "'Inter', sans-serif" }}>
+              <div style={{ textAlign: 'center', padding: 60, color: '#6b6250', fontFamily: "'Inter', sans-serif" }}>
                 {texts.some((t) => t.author === view)
                   ? 'Nessun testo trovato.'
                   : `Nessun testo di ${view === 'agnon' ? 'Agnon' : 'Shabtai'} ancora. Aggiungine uno.`}
@@ -1382,8 +1563,8 @@ function Keter() {
                   onClick={() => openText(t, textMatches.has(t.id) ? textQuery.trim() : '')}
                   style={{
                     textAlign: 'left',
-                    background: '#fffdf6',
-                    border: '1px solid #e0d4b6',
+                    background: '#28442a',
+                    border: '1px solid #457a54',
                     borderRadius: 10,
                     padding: '14px 16px',
                     display: 'flex',
@@ -1394,21 +1575,21 @@ function Keter() {
                 >
                   <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
                     {view === 'agnon' ? (
-                      <Feather size={16} color="#8a2433" style={{ marginTop: 3, flexShrink: 0 }} />
+                      <Feather size={16} color="#c9a24b" style={{ marginTop: 3, flexShrink: 0 }} />
                     ) : (
-                      <PenLine size={16} color="#8a2433" style={{ marginTop: 3, flexShrink: 0 }} />
+                      <PenLine size={16} color="#c9a24b" style={{ marginTop: 3, flexShrink: 0 }} />
                     )}
                     <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ fontSize: 16, fontFamily: "'Frank Ruhl Libre', serif", color: '#2b2318' }}>
+                      <div style={{ fontSize: 16, fontFamily: "'Frank Ruhl Libre', serif", color: '#f0e4c8' }}>
                         {t.title || 'Senza titolo'}
                       </div>
                       {t.source && (
-                        <div style={{ fontSize: 12, color: '#857659', marginTop: 2, fontFamily: "'Inter', sans-serif" }}>
+                        <div style={{ fontSize: 12, color: '#8a7f68', marginTop: 2, fontFamily: "'Inter', sans-serif" }}>
                           {t.source}
                         </div>
                       )}
                     </div>
-                    <ChevronRight size={16} color="#8a6d3a" style={{ flexShrink: 0, marginTop: 3 }} />
+                    <ChevronRight size={16} color="#96c4a0" style={{ flexShrink: 0, marginTop: 3 }} />
                   </div>
                   {textMatches.has(t.id) ? (
                     <>
@@ -1416,7 +1597,7 @@ function Keter() {
                         dir="rtl"
                         style={{
                           fontSize: 16,
-                          color: '#33291a',
+                          color: '#e6dcc2',
                           lineHeight: 1.9,
                           fontFamily: "'Frank Ruhl Libre', serif",
                           textAlign: 'right',
@@ -1426,12 +1607,12 @@ function Keter() {
                         {textMatches.get(t.id).before}
                         <span
                           style={{
-                            background: '#7a1f2b',
-                            color: '#f9efd7',
+                            background: '#e9c97a',
+                            color: '#1c1408',
                             fontWeight: 700,
                             borderRadius: 4,
                             padding: '0 4px',
-                            borderBottom: '2px solid #8a2433',
+                            borderBottom: '2px solid #c9a24b',
                           }}
                         >
                           {textMatches.get(t.id).hit}
@@ -1442,7 +1623,7 @@ function Keter() {
                         style={{
                           fontFamily: "'Inter', sans-serif",
                           fontSize: 11,
-                          color: '#8a6d3a',
+                          color: '#96c4a0',
                           display: 'flex',
                           alignItems: 'center',
                           gap: 5,
@@ -1460,7 +1641,7 @@ function Keter() {
                       dir="rtl"
                       style={{
                         fontSize: 16,
-                        color: '#33291a',
+                        color: '#e6dcc2',
                         lineHeight: 1.7,
                         fontFamily: "'Frank Ruhl Libre', serif",
                         textAlign: 'right',
@@ -1480,8 +1661,8 @@ function Keter() {
                             fontSize: 10,
                             padding: '2px 8px',
                             borderRadius: 999,
-                            border: '1px solid #cdbc9666',
-                            color: '#8a6d3a',
+                            border: '1px solid #67a37766',
+                            color: '#96c4a0',
                           }}
                         >
                           {x}
@@ -1503,7 +1684,7 @@ function Keter() {
           style={{
             position: 'fixed',
             inset: 0,
-            background: '#00000059',
+            background: '#000000cc',
             zIndex: 35,
             display: 'flex',
             alignItems: 'flex-end',
@@ -1518,8 +1699,8 @@ function Keter() {
               maxWidth: 720,
               maxHeight: '86vh',
               overflowY: 'auto',
-              background: '#faf4e4',
-              border: '1px solid #cdbc96',
+              background: '#2d5638',
+              border: '1px solid #67a377',
               borderBottom: 'none',
               borderRadius: '18px 18px 0 0',
               padding: '20px 20px 32px',
@@ -1531,9 +1712,9 @@ function Keter() {
                   onClick={startEdit}
                   style={{
                     background: 'none',
-                    border: '1px solid #cdbc96',
+                    border: '1px solid #67a377',
                     borderRadius: 8,
-                    color: '#8a2433',
+                    color: '#c9a24b',
                     padding: '6px 10px',
                     fontSize: 12,
                     fontFamily: "'Inter', sans-serif",
@@ -1551,9 +1732,9 @@ function Keter() {
                     onClick={() => { setDraft(selected); setEditing(false); }}
                     style={{
                       background: 'none',
-                      border: '1px solid #cdbc96',
+                      border: '1px solid #67a377',
                       borderRadius: 8,
-                      color: '#857659',
+                      color: '#8a7f68',
                       padding: '6px 10px',
                       fontSize: 12,
                       fontFamily: "'Inter', sans-serif",
@@ -1568,10 +1749,10 @@ function Keter() {
                   <button
                     onClick={saveEdit}
                     style={{
-                      background: '#8a243322',
-                      border: '1px solid #8a2433',
+                      background: '#c9a24b22',
+                      border: '1px solid #c9a24b',
                       borderRadius: 8,
-                      color: '#7a1f2b',
+                      color: '#e9c97a',
                       padding: '6px 10px',
                       fontSize: 12,
                       fontFamily: "'Inter', sans-serif",
@@ -1587,25 +1768,26 @@ function Keter() {
               )}
               <button
                 onClick={closeModal}
-                style={{ background: 'none', border: 'none', color: '#857659', cursor: 'pointer', padding: 6 }}
+                style={{ background: 'none', border: 'none', color: '#8a7f68', cursor: 'pointer', padding: 6 }}
                 aria-label="Chiudi"
               >
                 <X size={18} />
               </button>
             </div>
 
-            <div style={{ fontSize: 30, marginBottom: 6 }}>
+            <div style={{ fontSize: 26, marginBottom: 4 }}>
               {editing ? (
                 <input
                   value={draft.Parola || ''}
                   onChange={(ev) => updateDraftField('Parola', ev.target.value)}
                   dir={isHebrewText(draft.Parola) ? 'rtl' : 'ltr'}
+                  placeholder="מִלָּה — la parola"
                   style={{
                     width: '100%',
-                    background: '#f5efe0',
-                    border: '1px solid #cdbc96',
+                    background: '#3a6647',
+                    border: '1px solid #67a377',
                     borderRadius: 8,
-                    color: '#2b2318',
+                    color: '#f0e4c8',
                     fontSize: 22,
                     padding: '8px 10px',
                     fontFamily: "'Frank Ruhl Libre', serif",
@@ -1616,18 +1798,19 @@ function Keter() {
               )}
             </div>
 
-            <div style={{ fontSize: 19, color: '#8a2433', marginBottom: 18 }}>
+            <div style={{ fontSize: 17, color: '#c9a24b', marginBottom: 18 }}>
               {editing ? (
                 <input
                   value={draft.Traduzione || ''}
                   onChange={(ev) => updateDraftField('Traduzione', ev.target.value)}
                   dir={isHebrewText(draft.Traduzione) ? 'rtl' : 'ltr'}
+                  placeholder="Traduzione italiana"
                   style={{
                     width: '100%',
-                    background: '#f5efe0',
-                    border: '1px solid #cdbc96',
+                    background: '#3a6647',
+                    border: '1px solid #67a377',
                     borderRadius: 8,
-                    color: '#7a1f2b',
+                    color: '#e9c97a',
                     fontSize: 15,
                     padding: '7px 10px',
                     marginTop: 6,
@@ -1650,7 +1833,7 @@ function Keter() {
                       fontSize: 11,
                       letterSpacing: 1,
                       textTransform: 'uppercase',
-                      color: '#9a8c70',
+                      color: '#6b6250',
                       marginBottom: 6,
                     }}
                   >
@@ -1664,10 +1847,10 @@ function Keter() {
                       rows={3}
                       style={{
                         width: '100%',
-                        background: '#f5efe0',
-                        border: '1px solid #cdbc96',
+                        background: '#3a6647',
+                        border: '1px solid #67a377',
                         borderRadius: 8,
-                        color: '#33291a',
+                        color: '#ece4d3',
                         fontSize: 14,
                         padding: '8px 10px',
                         fontFamily: "'Cormorant Garamond', serif",
@@ -1675,7 +1858,7 @@ function Keter() {
                       }}
                     />
                   ) : (
-                    <div style={{ fontSize: 16.5, color: '#4a3f2c' }}>
+                    <div style={{ fontSize: 15, color: '#cfc4a8' }}>
                       <FieldText text={value} />
                     </div>
                   )}
@@ -1691,7 +1874,7 @@ function Keter() {
                     fontSize: 11,
                     letterSpacing: 1,
                     textTransform: 'uppercase',
-                    color: '#9a8c70',
+                    color: '#6b6250',
                     marginBottom: 6,
                   }}
                 >
@@ -1711,9 +1894,9 @@ function Keter() {
                         fontSize: 13,
                         padding: '7px 11px',
                         borderRadius: 8,
-                        border: '1px solid #8a243366',
-                        background: '#8a243311',
-                        color: '#7a1f2b',
+                        border: '1px solid #c9a24b66',
+                        background: '#c9a24b11',
+                        color: '#e9c97a',
                         cursor: 'pointer',
                       }}
                     >
@@ -1732,7 +1915,7 @@ function Keter() {
                     fontSize: 11,
                     letterSpacing: 1,
                     textTransform: 'uppercase',
-                    color: '#9a8c70',
+                    color: '#6b6250',
                     marginBottom: 6,
                   }}
                 >
@@ -1743,10 +1926,10 @@ function Keter() {
                   onChange={(ev) => updateDraftField('Tag', ev.target.value)}
                   style={{
                     width: '100%',
-                    background: '#f5efe0',
-                    border: '1px solid #cdbc96',
+                    background: '#3a6647',
+                    border: '1px solid #67a377',
                     borderRadius: 8,
-                    color: '#33291a',
+                    color: '#ece4d3',
                     fontSize: 13,
                     padding: '7px 10px',
                     fontFamily: "'Inter', sans-serif",
@@ -1765,7 +1948,7 @@ function Keter() {
           style={{
             position: 'fixed',
             inset: 0,
-            background: '#00000059',
+            background: '#000000cc',
             zIndex: 30,
             display: 'flex',
             alignItems: 'flex-end',
@@ -1780,8 +1963,8 @@ function Keter() {
               maxWidth: 720,
               maxHeight: '86vh',
               overflowY: 'auto',
-              background: '#f7f0dd',
-              border: '1px solid #cdbc96',
+              background: '#0e1a13',
+              border: '1px solid #67a377',
               borderBottom: 'none',
               borderRadius: '18px 18px 0 0',
               padding: '20px 20px 32px',
@@ -1793,9 +1976,9 @@ function Keter() {
                   onClick={startEditArticle}
                   style={{
                     background: 'none',
-                    border: '1px solid #cdbc96',
+                    border: '1px solid #67a377',
                     borderRadius: 8,
-                    color: '#8a2433',
+                    color: '#c9a24b',
                     padding: '6px 10px',
                     fontSize: 12,
                     fontFamily: "'Inter', sans-serif",
@@ -1813,9 +1996,9 @@ function Keter() {
                     onClick={() => { setArticleDraft(selectedArticle); setEditingArticle(false); }}
                     style={{
                       background: 'none',
-                      border: '1px solid #cdbc96',
+                      border: '1px solid #67a377',
                       borderRadius: 8,
-                      color: '#857659',
+                      color: '#8a7f68',
                       padding: '6px 10px',
                       fontSize: 12,
                       fontFamily: "'Inter', sans-serif",
@@ -1830,10 +2013,10 @@ function Keter() {
                   <button
                     onClick={saveArticle}
                     style={{
-                      background: '#8a243322',
-                      border: '1px solid #8a2433',
+                      background: '#c9a24b22',
+                      border: '1px solid #c9a24b',
                       borderRadius: 8,
-                      color: '#7a1f2b',
+                      color: '#e9c97a',
                       padding: '6px 10px',
                       fontSize: 12,
                       fontFamily: "'Inter', sans-serif",
@@ -1849,14 +2032,14 @@ function Keter() {
               )}
               <button
                 onClick={closeArticleModal}
-                style={{ background: 'none', border: 'none', color: '#857659', cursor: 'pointer', padding: 6 }}
+                style={{ background: 'none', border: 'none', color: '#8a7f68', cursor: 'pointer', padding: 6 }}
                 aria-label="Chiudi"
               >
                 <X size={18} />
               </button>
             </div>
 
-            <div style={{ fontSize: 22, marginBottom: 4, fontFamily: "'Frank Ruhl Libre', serif", color: '#2b2318' }}>
+            <div style={{ fontSize: 22, marginBottom: 4, fontFamily: "'Frank Ruhl Libre', serif", color: '#f0e4c8' }}>
               {editingArticle ? (
                 <input
                   value={articleDraft.title || ''}
@@ -1864,10 +2047,10 @@ function Keter() {
                   placeholder="Titolo"
                   style={{
                     width: '100%',
-                    background: '#fffdf6',
-                    border: '1px solid #cdbc96',
+                    background: '#142218',
+                    border: '1px solid #67a377',
                     borderRadius: 8,
-                    color: '#2b2318',
+                    color: '#f0e4c8',
                     fontSize: 18,
                     padding: '8px 10px',
                     fontFamily: "'Frank Ruhl Libre', serif",
@@ -1878,7 +2061,7 @@ function Keter() {
               )}
             </div>
 
-            <div style={{ fontSize: 13, color: '#8a2433', marginBottom: 18, fontFamily: "'Inter', sans-serif" }}>
+            <div style={{ fontSize: 13, color: '#c9a24b', marginBottom: 18, fontFamily: "'Inter', sans-serif" }}>
               {editingArticle ? (
                 <input
                   value={articleDraft.source || ''}
@@ -1886,10 +2069,10 @@ function Keter() {
                   placeholder="Fonte / riferimento"
                   style={{
                     width: '100%',
-                    background: '#fffdf6',
-                    border: '1px solid #cdbc96',
+                    background: '#142218',
+                    border: '1px solid #67a377',
                     borderRadius: 8,
-                    color: '#7a1f2b',
+                    color: '#e9c97a',
                     fontSize: 13,
                     padding: '7px 10px',
                     marginTop: 6,
@@ -1908,7 +2091,7 @@ function Keter() {
                   fontSize: 11,
                   letterSpacing: 1,
                   textTransform: 'uppercase',
-                  color: '#9a8c70',
+                  color: '#6b6250',
                   marginBottom: 6,
                 }}
               >
@@ -1921,10 +2104,10 @@ function Keter() {
                   rows={10}
                   style={{
                     width: '100%',
-                    background: '#fffdf6',
-                    border: '1px solid #cdbc96',
+                    background: '#142218',
+                    border: '1px solid #67a377',
                     borderRadius: 8,
-                    color: '#33291a',
+                    color: '#ece4d3',
                     fontSize: 14,
                     padding: '10px',
                     fontFamily: "'Cormorant Garamond', serif",
@@ -1933,7 +2116,7 @@ function Keter() {
                   }}
                 />
               ) : (
-                <div style={{ fontSize: 15, color: '#4a3f2c', whiteSpace: 'pre-wrap', lineHeight: 1.7, fontFamily: "'Cormorant Garamond', serif" }}>
+                <div style={{ fontSize: 15, color: '#cfc4a8', whiteSpace: 'pre-wrap', lineHeight: 1.7, fontFamily: "'Cormorant Garamond', serif" }}>
                   {selectedArticle.body}
                 </div>
               )}
@@ -1946,7 +2129,7 @@ function Keter() {
                   fontSize: 11,
                   letterSpacing: 1,
                   textTransform: 'uppercase',
-                  color: '#9a8c70',
+                  color: '#6b6250',
                   marginBottom: 6,
                 }}
               >
@@ -1959,10 +2142,10 @@ function Keter() {
                   placeholder="es. Morfologia, Stile"
                   style={{
                     width: '100%',
-                    background: '#fffdf6',
-                    border: '1px solid #cdbc96',
+                    background: '#142218',
+                    border: '1px solid #67a377',
                     borderRadius: 8,
-                    color: '#33291a',
+                    color: '#ece4d3',
                     fontSize: 13,
                     padding: '7px 10px',
                     fontFamily: "'Inter', sans-serif",
@@ -1978,8 +2161,8 @@ function Keter() {
                         fontSize: 11,
                         padding: '3px 9px',
                         borderRadius: 999,
-                        border: '1px solid #cdbc9666',
-                        color: '#8a6d3a',
+                        border: '1px solid #67a37766',
+                        color: '#96c4a0',
                       }}
                     >
                       {t}
@@ -1996,7 +2179,7 @@ function Keter() {
                   fontSize: 11,
                   letterSpacing: 1,
                   textTransform: 'uppercase',
-                  color: '#9a8c70',
+                  color: '#6b6250',
                   marginBottom: 6,
                 }}
               >
@@ -2010,10 +2193,10 @@ function Keter() {
                   dir="auto"
                   style={{
                     width: '100%',
-                    background: '#fffdf6',
-                    border: '1px solid #cdbc96',
+                    background: '#142218',
+                    border: '1px solid #67a377',
                     borderRadius: 8,
-                    color: '#33291a',
+                    color: '#ece4d3',
                     fontSize: 14,
                     padding: '7px 10px',
                     fontFamily: "'Frank Ruhl Libre', serif",
@@ -2033,9 +2216,9 @@ function Keter() {
                         fontSize: 13,
                         padding: '5px 11px',
                         borderRadius: 999,
-                        border: '1px solid #8a243366',
-                        background: '#8a243311',
-                        color: '#7a1f2b',
+                        border: '1px solid #c9a24b66',
+                        background: '#c9a24b11',
+                        color: '#e9c97a',
                         cursor: 'pointer',
                       }}
                     >
@@ -2044,7 +2227,7 @@ function Keter() {
                   ))}
                 </div>
               ) : (
-                <div style={{ fontSize: 13, color: '#9a8c70', fontFamily: "'Inter', sans-serif" }}>
+                <div style={{ fontSize: 13, color: '#6b6250', fontFamily: "'Inter', sans-serif" }}>
                   Nessuna voce collegata.
                 </div>
               )}
@@ -2060,7 +2243,7 @@ function Keter() {
           style={{
             position: 'fixed',
             inset: 0,
-            background: '#00000059',
+            background: '#000000cc',
             zIndex: 30,
             display: 'flex',
             alignItems: 'flex-end',
@@ -2075,27 +2258,27 @@ function Keter() {
               maxWidth: 720,
               maxHeight: '86vh',
               overflowY: 'auto',
-              background: '#f7f0dd',
-              border: '1px solid #cdbc96',
+              background: '#0e1a13',
+              border: '1px solid #67a377',
               borderBottom: 'none',
               borderRadius: '18px 18px 0 0',
               padding: '20px 20px 32px',
             }}
           >
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-              <div style={{ fontSize: 18, fontFamily: "'Frank Ruhl Libre', serif", color: '#2b2318' }}>
+              <div style={{ fontSize: 18, fontFamily: "'Frank Ruhl Libre', serif", color: '#f0e4c8' }}>
                 Importa articoli
               </div>
               <button
                 onClick={closeImport}
-                style={{ background: 'none', border: 'none', color: '#857659', cursor: 'pointer', padding: 6 }}
+                style={{ background: 'none', border: 'none', color: '#8a7f68', cursor: 'pointer', padding: 6 }}
                 aria-label="Chiudi"
               >
                 <X size={18} />
               </button>
             </div>
 
-            <div style={{ fontSize: 13, color: '#6a5c42', marginBottom: 12, fontFamily: "'Inter', sans-serif", lineHeight: 1.6 }}>
+            <div style={{ fontSize: 13, color: '#a89c81', marginBottom: 12, fontFamily: "'Inter', sans-serif", lineHeight: 1.6 }}>
               Incolla un array JSON di articoli. Ogni oggetto può avere: title, source, tags (separati da virgola), relatedWords (parole ebraiche separate da virgola), body.
             </div>
 
@@ -2106,10 +2289,10 @@ function Keter() {
               rows={12}
               style={{
                 width: '100%',
-                background: '#fffdf6',
-                border: '1px solid #cdbc96',
+                background: '#142218',
+                border: '1px solid #67a377',
                 borderRadius: 8,
-                color: '#33291a',
+                color: '#ece4d3',
                 fontSize: 13,
                 padding: '10px',
                 fontFamily: "'Inter', monospace",
@@ -2119,7 +2302,7 @@ function Keter() {
             />
 
             {importError && (
-              <div style={{ fontSize: 13, color: '#b0541e', marginBottom: 10, fontFamily: "'Inter', sans-serif" }}>
+              <div style={{ fontSize: 13, color: '#c98f4b', marginBottom: 10, fontFamily: "'Inter', sans-serif" }}>
                 {importError}
               </div>
             )}
@@ -2128,10 +2311,10 @@ function Keter() {
               onClick={submitImport}
               disabled={!importText.trim()}
               style={{
-                background: '#8a243322',
-                border: '1px solid #8a2433',
+                background: '#c9a24b22',
+                border: '1px solid #c9a24b',
                 borderRadius: 8,
-                color: '#7a1f2b',
+                color: '#e9c97a',
                 padding: '8px 14px',
                 fontSize: 13,
                 fontFamily: "'Inter', sans-serif",
@@ -2155,7 +2338,7 @@ function Keter() {
           style={{
             position: 'fixed',
             inset: 0,
-            background: '#00000059',
+            background: '#000000cc',
             zIndex: 30,
             display: 'flex',
             alignItems: 'flex-end',
@@ -2170,8 +2353,8 @@ function Keter() {
               maxWidth: 720,
               maxHeight: '90vh',
               overflowY: 'auto',
-              background: '#f7f0dd',
-              border: '1px solid #cdbc96',
+              background: '#0e1a13',
+              border: '1px solid #67a377',
               borderBottom: 'none',
               borderRadius: '18px 18px 0 0',
               padding: '20px 20px 40px',
@@ -2186,17 +2369,17 @@ function Keter() {
                     placeholder="Titolo"
                     style={{
                       width: '100%',
-                      background: '#fffdf6',
-                      border: '1px solid #cdbc96',
+                      background: '#142218',
+                      border: '1px solid #67a377',
                       borderRadius: 8,
-                      color: '#2b2318',
+                      color: '#f0e4c8',
                       fontSize: 17,
                       padding: '8px 10px',
                       fontFamily: "'Frank Ruhl Libre', serif",
                     }}
                   />
                 ) : (
-                  <div style={{ fontSize: 20, fontFamily: "'Frank Ruhl Libre', serif", color: '#2b2318' }}>
+                  <div style={{ fontSize: 20, fontFamily: "'Frank Ruhl Libre', serif", color: '#f0e4c8' }}>
                     {selectedText.title || 'Senza titolo'}
                   </div>
                 )}
@@ -2214,10 +2397,10 @@ function Keter() {
                     }}
                     title="Cerca nel testo"
                     style={{
-                      background: readerSearchOpen ? '#8a243322' : 'none',
-                      border: readerSearchOpen ? '1px solid #8a2433' : '1px solid #cdbc96',
+                      background: readerSearchOpen ? '#c9a24b22' : 'none',
+                      border: readerSearchOpen ? '1px solid #c9a24b' : '1px solid #67a377',
                       borderRadius: 8,
-                      color: readerSearchOpen ? '#7a1f2b' : '#8a6d3a',
+                      color: readerSearchOpen ? '#e9c97a' : '#96c4a0',
                       padding: '6px 10px',
                       fontSize: 12,
                       fontFamily: "'Inter', sans-serif",
@@ -2235,9 +2418,9 @@ function Keter() {
                     onClick={startEditText}
                     style={{
                       background: 'none',
-                      border: '1px solid #cdbc96',
+                      border: '1px solid #67a377',
                       borderRadius: 8,
-                      color: '#8a6d3a',
+                      color: '#96c4a0',
                       padding: '6px 10px',
                       fontSize: 12,
                       fontFamily: "'Inter', sans-serif",
@@ -2253,10 +2436,10 @@ function Keter() {
                   <button
                     onClick={saveText}
                     style={{
-                      background: '#8a243322',
-                      border: '1px solid #8a2433',
+                      background: '#c9a24b22',
+                      border: '1px solid #c9a24b',
                       borderRadius: 8,
-                      color: '#7a1f2b',
+                      color: '#e9c97a',
                       padding: '6px 10px',
                       fontSize: 12,
                       fontFamily: "'Inter', sans-serif",
@@ -2271,7 +2454,7 @@ function Keter() {
                 )}
                 <button
                   onClick={closeTextModal}
-                  style={{ background: 'none', border: 'none', color: '#857659', cursor: 'pointer', padding: 6 }}
+                  style={{ background: 'none', border: 'none', color: '#8a7f68', cursor: 'pointer', padding: 6 }}
                   aria-label="Chiudi"
                 >
                   <X size={18} />
@@ -2287,10 +2470,10 @@ function Keter() {
                   placeholder="Opera / fonte (es. תמול שלשום, cap. 3)"
                   style={{
                     width: '100%',
-                    background: '#fffdf6',
-                    border: '1px solid #cdbc96',
+                    background: '#142218',
+                    border: '1px solid #67a377',
                     borderRadius: 8,
-                    color: '#33291a',
+                    color: '#ece4d3',
                     fontSize: 13,
                     padding: '8px 10px',
                     fontFamily: "'Inter', sans-serif",
@@ -2302,10 +2485,10 @@ function Keter() {
                   placeholder="Tag (separati da virgola)"
                   style={{
                     width: '100%',
-                    background: '#fffdf6',
-                    border: '1px solid #cdbc96',
+                    background: '#142218',
+                    border: '1px solid #67a377',
                     borderRadius: 8,
-                    color: '#33291a',
+                    color: '#ece4d3',
                     fontSize: 13,
                     padding: '8px 10px',
                     fontFamily: "'Inter', sans-serif",
@@ -2318,17 +2501,17 @@ function Keter() {
                   placeholder="…מילים, מילים — vocaboli in evidenza, separati da virgola"
                   style={{
                     width: '100%',
-                    background: '#fffdf6',
-                    border: '1px solid #8a243366',
+                    background: '#142218',
+                    border: '1px solid #c9a24b66',
                     borderRadius: 8,
-                    color: '#7a1f2b',
+                    color: '#e9c97a',
                     fontSize: 15,
                     padding: '8px 10px',
                     fontFamily: "'Frank Ruhl Libre', serif",
                   }}
                 />
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: -4 }}>
-                  <div style={{ fontSize: 11, color: '#857659', fontFamily: "'Inter', sans-serif" }}>
+                  <div style={{ fontSize: 11, color: '#8a7f68', fontFamily: "'Inter', sans-serif" }}>
                     Testo ebraico
                   </div>
                   <button
@@ -2336,9 +2519,9 @@ function Keter() {
                     disabled={pdfState === 'loading'}
                     style={{
                       background: 'none',
-                      border: '1px dashed #cdbc96',
+                      border: '1px dashed #67a377',
                       borderRadius: 8,
-                      color: pdfState === 'loading' ? '#857659' : '#8a6d3a',
+                      color: pdfState === 'loading' ? '#8a7f68' : '#96c4a0',
                       padding: '4px 9px',
                       fontSize: 11,
                       fontFamily: "'Inter', sans-serif",
@@ -2362,7 +2545,7 @@ function Keter() {
                   <div
                     style={{
                       fontSize: 12,
-                      color: pdfState === 'error' ? '#b0541e' : '#8a2433',
+                      color: pdfState === 'error' ? '#c98f4b' : '#c9a24b',
                       fontFamily: "'Inter', sans-serif",
                       lineHeight: 1.5,
                     }}
@@ -2378,10 +2561,10 @@ function Keter() {
                   placeholder="הטקסט העברי…"
                   style={{
                     width: '100%',
-                    background: '#fffdf6',
-                    border: '1px solid #cdbc96',
+                    background: '#142218',
+                    border: '1px solid #67a377',
                     borderRadius: 8,
-                    color: '#2b2318',
+                    color: '#f0e4c8',
                     fontSize: 18,
                     lineHeight: 1.8,
                     padding: '10px',
@@ -2389,7 +2572,7 @@ function Keter() {
                     resize: 'vertical',
                   }}
                 />
-                <div style={{ fontSize: 11, color: '#857659', fontFamily: "'Inter', sans-serif", marginBottom: -4 }}>
+                <div style={{ fontSize: 11, color: '#8a7f68', fontFamily: "'Inter', sans-serif", marginBottom: -4 }}>
                   Traduzione
                 </div>
                 <textarea
@@ -2399,10 +2582,10 @@ function Keter() {
                   placeholder="La tua traduzione italiana…"
                   style={{
                     width: '100%',
-                    background: '#fffdf6',
-                    border: '1px solid #cdbc96',
+                    background: '#142218',
+                    border: '1px solid #67a377',
                     borderRadius: 8,
-                    color: '#33291a',
+                    color: '#ece4d3',
                     fontSize: 14,
                     lineHeight: 1.6,
                     padding: '10px',
@@ -2410,7 +2593,7 @@ function Keter() {
                     resize: 'vertical',
                   }}
                 />
-                <div style={{ fontSize: 11, color: '#857659', fontFamily: "'Inter', sans-serif", marginBottom: -4 }}>
+                <div style={{ fontSize: 11, color: '#8a7f68', fontFamily: "'Inter', sans-serif", marginBottom: -4 }}>
                   Note
                 </div>
                 <textarea
@@ -2420,10 +2603,10 @@ function Keter() {
                   placeholder="Note stilistiche, lessicali, letterarie…"
                   style={{
                     width: '100%',
-                    background: '#fffdf6',
-                    border: '1px solid #cdbc96',
+                    background: '#142218',
+                    border: '1px solid #67a377',
                     borderRadius: 8,
-                    color: '#33291a',
+                    color: '#ece4d3',
                     fontSize: 14,
                     lineHeight: 1.6,
                     padding: '10px',
@@ -2435,13 +2618,13 @@ function Keter() {
             ) : (
               <>
                 {selectedText.source && (
-                  <div style={{ fontSize: 13, color: '#857659', fontFamily: "'Inter', sans-serif", marginBottom: 14 }}>
+                  <div style={{ fontSize: 13, color: '#8a7f68', fontFamily: "'Inter', sans-serif", marginBottom: 14 }}>
                     {selectedText.source}
                   </div>
                 )}
                 {readerSearchOpen && (
                   <div style={{ position: 'relative', marginBottom: 12 }}>
-                    <Search size={15} style={{ position: 'absolute', top: 11, right: 12, color: '#8a6d3a' }} />
+                    <Search size={15} style={{ position: 'absolute', top: 11, right: 12, color: '#67a377' }} />
                     <input
                       value={readerQuery}
                       onChange={(e) => setReaderQuery(e.target.value)}
@@ -2450,10 +2633,10 @@ function Keter() {
                       dir="auto"
                       style={{
                         width: '100%',
-                        background: '#fffdf6',
-                        border: '1px solid #cdbc96',
+                        background: '#142218',
+                        border: '1px solid #67a377',
                         borderRadius: 10,
-                        color: '#2b2318',
+                        color: '#f0e4c8',
                         fontSize: 15,
                         padding: '9px 36px 9px 12px',
                         fontFamily: "'Frank Ruhl Libre', serif",
@@ -2464,12 +2647,12 @@ function Keter() {
                       <X
                         size={15}
                         onClick={() => setReaderQuery('')}
-                        style={{ position: 'absolute', top: 11, left: 12, color: '#857659', cursor: 'pointer' }}
+                        style={{ position: 'absolute', top: 11, left: 12, color: '#8a7f68', cursor: 'pointer' }}
                       />
                     )}
                   </div>
                 )}
-                <div style={{ fontSize: 11, color: '#8a6d3a', fontFamily: "'Inter', sans-serif", marginBottom: 8 }}>
+                <div style={{ fontSize: 11, color: '#67a377', fontFamily: "'Inter', sans-serif", marginBottom: 8 }}>
                   Tocca una parola per cercarla nel Lessico
                 </div>
                 {(() => {
@@ -2480,7 +2663,7 @@ function Keter() {
                     const matched = allLines.filter((l) => l.trim() && normalizeHebrew(l).includes(rqNorm));
                     return (
                       <>
-                        <div style={{ fontSize: 12, color: matched.length ? '#8a6d3a' : '#857659', fontFamily: "'Inter', sans-serif", marginBottom: 10 }}>
+                        <div style={{ fontSize: 12, color: matched.length ? '#96c4a0' : '#8a7f68', fontFamily: "'Inter', sans-serif", marginBottom: 10 }}>
                           {matched.length
                             ? `${matched.length} paragraf${matched.length === 1 ? 'o' : 'i'} trovat${matched.length === 1 ? 'o' : 'i'}`
                             : 'Nessun paragrafo trovato'}
@@ -2513,10 +2696,10 @@ function Keter() {
                           style={{
                             width: '100%',
                             background: 'transparent',
-                            border: '1px dashed #cdbc96',
+                            border: '1px dashed #67a377',
                             borderRadius: 10,
                             padding: '10px 14px',
-                            color: '#8a6d3a',
+                            color: '#96c4a0',
                             fontFamily: "'Inter', sans-serif",
                             fontSize: 13,
                             cursor: 'pointer',
@@ -2531,7 +2714,7 @@ function Keter() {
                 })()}
                 {(selectedText.linkedWords || '').trim() && (
                   <div style={{ marginBottom: 18 }}>
-                    <div style={{ fontSize: 11, color: '#857659', fontFamily: "'Inter', sans-serif", textTransform: 'uppercase', letterSpacing: 1, marginBottom: 6 }}>
+                    <div style={{ fontSize: 11, color: '#8a7f68', fontFamily: "'Inter', sans-serif", textTransform: 'uppercase', letterSpacing: 1, marginBottom: 6 }}>
                       In evidenza
                     </div>
                     <div dir="rtl" style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
@@ -2544,9 +2727,9 @@ function Keter() {
                             fontSize: 16,
                             padding: '3px 10px',
                             borderRadius: 999,
-                            border: '1px solid #8a2433',
-                            background: '#8a243318',
-                            color: '#7a1f2b',
+                            border: '1px solid #c9a24b',
+                            background: '#c9a24b18',
+                            color: '#e9c97a',
                             cursor: 'pointer',
                           }}
                         >
@@ -2558,20 +2741,20 @@ function Keter() {
                 )}
                 {selectedText.translation && (
                   <div style={{ marginBottom: 16 }}>
-                    <div style={{ fontSize: 11, color: '#857659', fontFamily: "'Inter', sans-serif", textTransform: 'uppercase', letterSpacing: 1, marginBottom: 6 }}>
+                    <div style={{ fontSize: 11, color: '#8a7f68', fontFamily: "'Inter', sans-serif", textTransform: 'uppercase', letterSpacing: 1, marginBottom: 6 }}>
                       Traduzione
                     </div>
-                    <div style={{ fontSize: 15, color: '#574a34', lineHeight: 1.7, whiteSpace: 'pre-wrap' }}>
+                    <div style={{ fontSize: 15, color: '#dcd2b8', lineHeight: 1.7, whiteSpace: 'pre-wrap' }}>
                       {selectedText.translation}
                     </div>
                   </div>
                 )}
                 {selectedText.notes && (
                   <div style={{ marginBottom: 8 }}>
-                    <div style={{ fontSize: 11, color: '#857659', fontFamily: "'Inter', sans-serif", textTransform: 'uppercase', letterSpacing: 1, marginBottom: 6 }}>
+                    <div style={{ fontSize: 11, color: '#8a7f68', fontFamily: "'Inter', sans-serif", textTransform: 'uppercase', letterSpacing: 1, marginBottom: 6 }}>
                       Note
                     </div>
-                    <div style={{ fontSize: 14, color: '#4a3f2c', lineHeight: 1.7, whiteSpace: 'pre-wrap', fontFamily: "'Inter', sans-serif" }}>
+                    <div style={{ fontSize: 14, color: '#cfc4a8', lineHeight: 1.7, whiteSpace: 'pre-wrap', fontFamily: "'Inter', sans-serif" }}>
                       {selectedText.notes}
                     </div>
                   </div>
@@ -2589,7 +2772,7 @@ function Keter() {
           style={{
             position: 'fixed',
             inset: 0,
-            background: '#00000045',
+            background: '#00000099',
             zIndex: 50,
             display: 'flex',
             alignItems: 'flex-end',
@@ -2604,15 +2787,15 @@ function Keter() {
               maxWidth: 720,
               maxHeight: '60vh',
               overflowY: 'auto',
-              background: '#f7f0dd',
-              border: '1px solid #8a2433',
+              background: '#0e1a13',
+              border: '1px solid #c9a24b',
               borderBottom: 'none',
               borderRadius: '18px 18px 0 0',
               padding: '18px 20px 30px',
             }}
           >
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-              <div dir="rtl" style={{ fontSize: 24, fontFamily: "'Frank Ruhl Libre', serif", color: '#7a1f2b' }}>
+              <div dir="rtl" style={{ fontSize: 24, fontFamily: "'Frank Ruhl Libre', serif", color: '#e9c97a' }}>
                 {wordLookup.raw.replace(/[^\u0590-\u05FF"'׳״־]/g, '')}
               </div>
               <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
@@ -2620,10 +2803,10 @@ function Keter() {
                   <button
                     onClick={() => toggleLinkedWord(wordLookup.word)}
                     style={{
-                      background: wordInSet(wordLookup.word, linkedSetOf(selectedText)) ? '#8a243322' : 'none',
-                      border: '1px solid #8a2433',
+                      background: wordInSet(wordLookup.word, linkedSetOf(selectedText)) ? '#c9a24b22' : 'none',
+                      border: '1px solid #c9a24b',
                       borderRadius: 8,
-                      color: '#7a1f2b',
+                      color: '#e9c97a',
                       padding: '5px 10px',
                       fontSize: 11,
                       fontFamily: "'Inter', sans-serif",
@@ -2636,7 +2819,7 @@ function Keter() {
                 )}
                 <button
                   onClick={() => setWordLookup(null)}
-                  style={{ background: 'none', border: 'none', color: '#857659', cursor: 'pointer', padding: 6 }}
+                  style={{ background: 'none', border: 'none', color: '#8a7f68', cursor: 'pointer', padding: 6 }}
                   aria-label="Chiudi"
                 >
                   <X size={18} />
@@ -2655,8 +2838,8 @@ function Keter() {
                     }}
                     style={{
                       textAlign: 'left',
-                      background: '#fffdf6',
-                      border: '1px solid #e0d4b6',
+                      background: '#28442a',
+                      border: '1px solid #457a54',
                       borderRadius: 10,
                       padding: '10px 14px',
                       display: 'flex',
@@ -2665,19 +2848,19 @@ function Keter() {
                       cursor: 'pointer',
                     }}
                   >
-                    <div dir="rtl" style={{ fontSize: 20, fontWeight: 500, fontFamily: "'Frank Ruhl Libre', serif", color: '#2b2318', flexShrink: 0 }}>
+                    <div dir="rtl" style={{ fontSize: 18, fontFamily: "'Frank Ruhl Libre', serif", color: '#f0e4c8', flexShrink: 0 }}>
                       {e.Parola}
                     </div>
-                    <div style={{ flex: 1, fontSize: 14, color: '#4a3f2c', fontFamily: "'Inter', sans-serif", minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    <div style={{ flex: 1, fontSize: 13, color: '#cfc4a8', fontFamily: "'Inter', sans-serif", minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                       {e.Traduzione || ''}
                     </div>
-                    <ChevronRight size={15} color="#8a6d3a" style={{ flexShrink: 0 }} />
+                    <ChevronRight size={15} color="#96c4a0" style={{ flexShrink: 0 }} />
                   </button>
                 ))}
               </div>
             ) : (
               <>
-                <div style={{ fontSize: 14, color: '#6a5c42', fontFamily: "'Inter', sans-serif", marginBottom: 12 }}>
+                <div style={{ fontSize: 14, color: '#a89c81', fontFamily: "'Inter', sans-serif", marginBottom: 12 }}>
                   Nessuna voce trovata nel Lessico per «{wordLookup.word}».
                 </div>
                 <button
@@ -2690,10 +2873,10 @@ function Keter() {
                   }}
                   style={{
                     width: '100%',
-                    background: '#8a243322',
-                    border: '1px solid #8a2433',
+                    background: '#c9a24b22',
+                    border: '1px solid #c9a24b',
                     borderRadius: 8,
-                    color: '#7a1f2b',
+                    color: '#e9c97a',
                     padding: '10px',
                     fontSize: 14,
                     fontFamily: "'Inter', sans-serif",
@@ -2712,14 +2895,14 @@ function Keter() {
         </div>
       )}
 
-      {/* Export Edits Modal */}
+      {/* Publish / Export Edits Modal */}
       {editsPanel === 'export' && (
         <div
           onClick={() => setEditsPanel(null)}
           style={{
             position: 'fixed',
             inset: 0,
-            background: '#00000059',
+            background: '#000000cc',
             zIndex: 40,
             display: 'flex',
             alignItems: 'flex-end',
@@ -2734,46 +2917,79 @@ function Keter() {
               maxWidth: 720,
               maxHeight: '86vh',
               overflowY: 'auto',
-              background: '#f7f0dd',
-              border: '1px solid #cdbc96',
+              background: '#0e1a13',
+              border: '1px solid #67a377',
               borderBottom: 'none',
               borderRadius: '18px 18px 0 0',
               padding: '20px 20px 32px',
             }}
           >
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-              <div style={{ fontSize: 18, fontFamily: "'Frank Ruhl Libre', serif", color: '#2b2318' }}>
-                Esporta modifiche · {pendingCount}
+              <div style={{ fontSize: 18, fontFamily: "'Frank Ruhl Libre', serif", color: '#f0e4c8' }}>
+                Modifiche in sospeso · {pendingCount}
               </div>
               <button
                 onClick={() => setEditsPanel(null)}
-                style={{ background: 'none', border: 'none', color: '#857659', cursor: 'pointer', padding: 6 }}
+                style={{ background: 'none', border: 'none', color: '#8a7f68', cursor: 'pointer', padding: 6 }}
                 aria-label="Chiudi"
               >
                 <X size={18} />
               </button>
             </div>
 
-            {pendingCount === 0 ? (
-              <div style={{ fontSize: 13, color: '#6a5c42', fontFamily: "'Inter', sans-serif" }}>
-                Nessuna modifica in questa sessione. Modifica una voce del lessico o un testo e la troverai qui.
+            {publishState === 'published' ? (
+              <div style={{ fontSize: 14, color: '#96c4a0', fontFamily: "'Inter', sans-serif", lineHeight: 1.7 }}>
+                ✓ Modifiche pubblicate nel repository. Il sito si aggiorna da solo entro un paio di minuti; gli altri dispositivi le riceveranno alla prossima apertura dell'app.
+              </div>
+            ) : pendingCount === 0 ? (
+              <div style={{ fontSize: 13, color: '#a89c81', fontFamily: "'Inter', sans-serif" }}>
+                Nessuna modifica in questa sessione. Crea o modifica una voce del lessico o un testo e la troverai qui, pronta da pubblicare.
               </div>
             ) : (
               <>
-                <div style={{ fontSize: 13, color: '#6a5c42', marginBottom: 12, fontFamily: "'Inter', sans-serif", lineHeight: 1.6 }}>
-                  Copia questo JSON e conservalo: contiene le voci del lessico e i testi modificati in questa sessione. Nella prossima sessione puoi re-importarlo qui, oppure passarlo a Claude per fonderlo definitivamente nel file.
+                <div style={{ fontSize: 13, color: '#a89c81', marginBottom: 12, fontFamily: "'Inter', sans-serif", lineHeight: 1.6 }}>
+                  Le voci del lessico e i testi creati o modificati in questa sessione. «Pubblica su GitHub» li salva in modo permanente nel repository (file modifiche.json), rendendoli disponibili su tutti i dispositivi. In alternativa puoi copiare il JSON come copia di riserva.
                 </div>
+                <button
+                  onClick={publishToGithub}
+                  disabled={publishState === 'publishing'}
+                  style={{
+                    width: '100%',
+                    background: '#c9a24b',
+                    border: '1px solid #c9a24b',
+                    borderRadius: 8,
+                    color: '#1a2b20',
+                    fontWeight: 600,
+                    padding: '11px',
+                    fontSize: 14,
+                    fontFamily: "'Inter', sans-serif",
+                    cursor: publishState === 'publishing' ? 'wait' : 'pointer',
+                    opacity: publishState === 'publishing' ? 0.7 : 1,
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    gap: 6,
+                    marginBottom: 10,
+                  }}
+                >
+                  <Upload size={15} /> {publishState === 'publishing' ? 'Pubblico…' : 'Pubblica su GitHub'}
+                </button>
+                {publishState === 'error' && (
+                  <div style={{ fontSize: 12, color: '#c98f4b', marginBottom: 10, fontFamily: "'Inter', sans-serif", lineHeight: 1.5 }}>
+                    Pubblicazione fallita: {publishError}
+                  </div>
+                )}
                 <textarea
                   readOnly
                   value={JSON.stringify(exportPayload, null, 2)}
-                  rows={12}
+                  rows={10}
                   onFocus={(e) => e.target.select()}
                   style={{
                     width: '100%',
-                    background: '#fffdf6',
-                    border: '1px solid #cdbc96',
+                    background: '#142218',
+                    border: '1px solid #67a377',
                     borderRadius: 8,
-                    color: '#33291a',
+                    color: '#ece4d3',
                     fontSize: 13,
                     padding: '10px',
                     fontFamily: "'Inter', monospace",
@@ -2785,10 +3001,10 @@ function Keter() {
                   onClick={copyEditsJson}
                   style={{
                     width: '100%',
-                    background: '#8a243322',
-                    border: '1px solid #8a2433',
+                    background: '#c9a24b22',
+                    border: '1px solid #c9a24b',
                     borderRadius: 8,
-                    color: '#7a1f2b',
+                    color: '#e9c97a',
                     padding: '10px',
                     fontSize: 14,
                     fontFamily: "'Inter', sans-serif",
@@ -2803,6 +3019,23 @@ function Keter() {
                 </button>
               </>
             )}
+
+            <div style={{ marginTop: 16, textAlign: 'center' }}>
+              <button
+                onClick={() => getGithubToken(true)}
+                style={{
+                  background: 'none',
+                  border: 'none',
+                  color: '#67a377',
+                  fontSize: 11,
+                  fontFamily: "'Inter', sans-serif",
+                  cursor: 'pointer',
+                  textDecoration: 'underline',
+                }}
+              >
+                Imposta o cambia il token GitHub
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -2814,7 +3047,7 @@ function Keter() {
           style={{
             position: 'fixed',
             inset: 0,
-            background: '#00000059',
+            background: '#000000cc',
             zIndex: 40,
             display: 'flex',
             alignItems: 'flex-end',
@@ -2829,28 +3062,28 @@ function Keter() {
               maxWidth: 720,
               maxHeight: '86vh',
               overflowY: 'auto',
-              background: '#f7f0dd',
-              border: '1px solid #cdbc96',
+              background: '#0e1a13',
+              border: '1px solid #67a377',
               borderBottom: 'none',
               borderRadius: '18px 18px 0 0',
               padding: '20px 20px 32px',
             }}
           >
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-              <div style={{ fontSize: 18, fontFamily: "'Frank Ruhl Libre', serif", color: '#2b2318' }}>
+              <div style={{ fontSize: 18, fontFamily: "'Frank Ruhl Libre', serif", color: '#f0e4c8' }}>
                 Importa modifiche
               </div>
               <button
                 onClick={() => setEditsPanel(null)}
-                style={{ background: 'none', border: 'none', color: '#857659', cursor: 'pointer', padding: 6 }}
+                style={{ background: 'none', border: 'none', color: '#8a7f68', cursor: 'pointer', padding: 6 }}
                 aria-label="Chiudi"
               >
                 <X size={18} />
               </button>
             </div>
 
-            <div style={{ fontSize: 13, color: '#6a5c42', marginBottom: 12, fontFamily: "'Inter', sans-serif", lineHeight: 1.6 }}>
-              {'Incolla il JSON esportato da una sessione precedente. Accetta sia il nuovo formato { lessico, testi } sia il vecchio (oggetto id \u2192 voce). Le modifiche verranno riapplicate.'}
+            <div style={{ fontSize: 13, color: '#a89c81', marginBottom: 12, fontFamily: "'Inter', sans-serif", lineHeight: 1.6 }}>
+              Incolla il JSON esportato da una sessione precedente. Accetta sia il nuovo formato {'{ lessico, testi }'} sia il vecchio (oggetto id → voce). Le modifiche verranno riapplicate e potrai poi pubblicarle.
             </div>
 
             <textarea
@@ -2860,10 +3093,10 @@ function Keter() {
               rows={12}
               style={{
                 width: '100%',
-                background: '#fffdf6',
-                border: '1px solid #cdbc96',
+                background: '#142218',
+                border: '1px solid #67a377',
                 borderRadius: 8,
-                color: '#33291a',
+                color: '#ece4d3',
                 fontSize: 13,
                 padding: '10px',
                 fontFamily: "'Inter', monospace",
@@ -2873,7 +3106,7 @@ function Keter() {
             />
 
             {editsImportError && (
-              <div style={{ fontSize: 13, color: '#b0541e', marginBottom: 10, fontFamily: "'Inter', sans-serif" }}>
+              <div style={{ fontSize: 13, color: '#c98f4b', marginBottom: 10, fontFamily: "'Inter', sans-serif" }}>
                 {editsImportError}
               </div>
             )}
@@ -2882,10 +3115,10 @@ function Keter() {
               onClick={submitEditsImport}
               style={{
                 width: '100%',
-                background: '#8a243322',
-                border: '1px solid #8a2433',
+                background: '#c9a24b22',
+                border: '1px solid #c9a24b',
                 borderRadius: 8,
-                color: '#7a1f2b',
+                color: '#e9c97a',
                 padding: '10px',
                 fontSize: 14,
                 fontFamily: "'Inter', sans-serif",
