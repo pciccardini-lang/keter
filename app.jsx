@@ -130,6 +130,7 @@ function Keter() {
   const [publishError, setPublishError] = useState('');
 
   const [articles, setArticles] = useState(ARTICLES_SEED);
+  const [sessionArticles, setSessionArticles] = useState({});
   const [articleQuery, setArticleQuery] = useState('');
   const [selectedArticle, setSelectedArticle] = useState(null);
   const [editingArticle, setEditingArticle] = useState(false);
@@ -195,26 +196,21 @@ function Keter() {
         if (Array.isArray(localTexts)) next = mergeTextsList(next, localTexts);
         return next;
       });
-      setLoaded(true);
-    })();
-  }, []);
-
-  useEffect(() => {
-    (async () => {
+      // 5. articoli: seed -> pubblicati -> locali
+      let localArticles = null;
       try {
-        const result = await window.storage.get('keter-articles', false);
-        if (result && result.value) {
-          const saved = JSON.parse(result.value);
-          const seedIds = new Set(ARTICLES_SEED.map((a) => a.id));
-          const overrides = saved.filter((a) => seedIds.has(a.id));
-          const custom = saved.filter((a) => !seedIds.has(a.id));
-          setArticles(
-            ARTICLES_SEED.map((a) => overrides.find((o) => o.id === a.id) || a).concat(custom)
-          );
-        }
+        const r = await window.storage.get('keter-articles', false);
+        if (r && r.value) localArticles = JSON.parse(r.value);
       } catch (err) {
-        // nessun articolo salvato ancora
+        localArticles = null;
       }
+      setArticles(() => {
+        let next = ARTICLES_SEED;
+        if (published && Array.isArray(published.articoli)) next = mergeTextsList(next, published.articoli);
+        if (Array.isArray(localArticles)) next = mergeTextsList(next, localArticles);
+        return next;
+      });
+      setLoaded(true);
     })();
   }, []);
 
@@ -348,10 +344,12 @@ function Keter() {
       const parsed = JSON.parse(editsImportText);
       let map = {};
       let textsList = [];
-      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed) && (parsed.lessico || parsed.testi)) {
-        // nuovo formato: { lessico: {...}, testi: [...] }
+      let articlesList = [];
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed) && (parsed.lessico || parsed.testi || parsed.articoli)) {
+        // nuovo formato: { lessico: {...}, testi: [...], articoli: [...] }
         map = parsed.lessico || {};
         textsList = Array.isArray(parsed.testi) ? parsed.testi : [];
+        articlesList = Array.isArray(parsed.articoli) ? parsed.articoli : [];
       } else if (Array.isArray(parsed)) {
         parsed.forEach((e) => {
           if (e && e.id !== undefined) map[e.id] = e;
@@ -361,10 +359,18 @@ function Keter() {
       } else {
         throw new Error('formato non valido');
       }
-      const n = Object.keys(map).length + textsList.length;
+      const n = Object.keys(map).length + textsList.length + articlesList.length;
       if (!n) throw new Error('nessuna modifica trovata');
       if (Object.keys(map).length) applyEditsMap(map);
       if (textsList.length) applyTextsList(textsList);
+      if (articlesList.length) {
+        setArticles((base) => mergeTextsList(base, articlesList));
+        setSessionArticles((prev) => {
+          const next = { ...prev };
+          articlesList.forEach((a) => { if (a && a.id !== undefined) next[a.id] = a; });
+          return next;
+        });
+      }
       setEditsImportText('');
       setEditsPanel(null);
     } catch (err) {
@@ -414,7 +420,7 @@ function Keter() {
       };
       // 1. Legge la versione corrente del file (sha + contenuto), se esiste.
       let sha = null;
-      let remote = { lessico: {}, testi: [] };
+      let remote = { lessico: {}, testi: [], articoli: [] };
       const getResp = await fetch(apiUrl + '?ref=' + GH_BRANCH + '&t=' + Date.now(), { headers });
       if (getResp.status === 200) {
         const info = await getResp.json();
@@ -424,6 +430,7 @@ function Keter() {
           if (parsed && typeof parsed === 'object') {
             remote.lessico = parsed.lessico || {};
             remote.testi = Array.isArray(parsed.testi) ? parsed.testi : [];
+            remote.articoli = Array.isArray(parsed.articoli) ? parsed.articoli : [];
           }
         } catch (e) {
           // contenuto illeggibile: verrà riscritto da zero
@@ -438,7 +445,13 @@ function Keter() {
       const mergedLessico = { ...remote.lessico, ...sessionEdits };
       const textMap = new Map(remote.testi.filter((t) => t && t.id !== undefined).map((t) => [t.id, t]));
       Object.values(sessionTexts).forEach((t) => { if (t && t.id !== undefined) textMap.set(t.id, t); });
-      const merged = { lessico: mergedLessico, testi: Array.from(textMap.values()) };
+      const articleMap = new Map(remote.articoli.filter((a) => a && a.id !== undefined).map((a) => [a.id, a]));
+      Object.values(sessionArticles).forEach((a) => { if (a && a.id !== undefined) articleMap.set(a.id, a); });
+      const merged = {
+        lessico: mergedLessico,
+        testi: Array.from(textMap.values()),
+        articoli: Array.from(articleMap.values()),
+      };
       // 3. Scrive il file aggiornato (lo crea se non esiste).
       const putResp = await fetch(apiUrl, {
         method: 'PUT',
@@ -460,6 +473,7 @@ function Keter() {
       }
       setSessionEdits({});
       setSessionTexts({});
+      setSessionArticles({});
       setPublishState('published');
       setTimeout(() => setPublishState('idle'), 5000);
     } catch (err) {
@@ -604,10 +618,11 @@ function Keter() {
   }, [texts, textQuery, view, textBodiesIndex]);
 
   const exportPayload = useMemo(
-    () => ({ lessico: sessionEdits, testi: Object.values(sessionTexts) }),
-    [sessionEdits, sessionTexts]
+    () => ({ lessico: sessionEdits, testi: Object.values(sessionTexts), articoli: Object.values(sessionArticles) }),
+    [sessionEdits, sessionTexts, sessionArticles]
   );
-  const pendingCount = Object.keys(sessionEdits).length + Object.keys(sessionTexts).length;
+  const pendingCount =
+    Object.keys(sessionEdits).length + Object.keys(sessionTexts).length + Object.keys(sessionArticles).length;
 
   const openText = (t, withQuery = '') => {
     setSelectedText(t);
@@ -980,14 +995,24 @@ function Keter() {
   const saveArticle = async () => {
     setArticleSaveState('saving');
     try {
-      const isNew = !articles.find((a) => a.id === articleDraft.id);
-      const updated = isNew ? [...articles, articleDraft] : articles.map((a) => (a.id === articleDraft.id ? articleDraft : a));
-      await window.storage.set('keter-articles', JSON.stringify(updated), false);
+      const saved = { ...articleDraft };
+      const isNew = !articles.find((a) => a.id === saved.id);
+      const updated = isNew ? [...articles, saved] : articles.map((a) => (a.id === saved.id ? saved : a));
+      // 1. Stato locale, subito.
       setArticles(updated);
-      setSelectedArticle(articleDraft);
+      setSelectedArticle(saved);
+      setSessionArticles((prev) => ({ ...prev, [saved.id]: saved }));
       setEditingArticle(false);
-      setArticleSaveState('saved');
-      setTimeout(() => setArticleSaveState('idle'), 1500);
+      // 2. window.storage best-effort.
+      let persisted = false;
+      try {
+        const res = await window.storage.set('keter-articles', JSON.stringify(updated), false);
+        persisted = !!res;
+      } catch (err) {
+        persisted = false;
+      }
+      setArticleSaveState(persisted ? 'saved' : 'saved-local');
+      setTimeout(() => setArticleSaveState('idle'), 2000);
     } catch (err) {
       setArticleSaveState('error');
     }
@@ -1006,16 +1031,39 @@ function Keter() {
   };
 
   const submitImport = async () => {
-    let parsed;
-    try {
-      parsed = JSON.parse(importText);
-      if (!Array.isArray(parsed)) throw new Error('Il testo deve essere un array JSON di articoli.');
-    } catch (err) {
-      setImportError('JSON non valido: ' + err.message);
+    setImportError('');
+    const raw = importText.trim();
+    if (!raw) return;
+    // Formato flessibile: array JSON, singolo oggetto, { articoli: [...] },
+    // oppure testo semplice (prima riga = titolo, resto = corpo).
+    let items = null;
+    let parsed = null;
+    try { parsed = JSON.parse(raw); } catch (err) { parsed = null; }
+    if (parsed && typeof parsed === 'object') {
+      if (Array.isArray(parsed)) items = parsed;
+      else if (Array.isArray(parsed.articoli)) items = parsed.articoli;
+      else if (Array.isArray(parsed.articles)) items = parsed.articles;
+      else if (parsed.lessico || parsed.testi) {
+        setImportError('Questo è il JSON delle modifiche di sessione: incollalo nel pannello con l\u2019icona \u2191 in alto, non qui.');
+        return;
+      } else if (parsed.title || parsed.body) items = [parsed];
+      else {
+        setImportError('JSON riconosciuto ma senza articoli: serve un array [...], un oggetto { articoli: [...] } o un singolo articolo con title/body.');
+        return;
+      }
+    } else {
+      const lines = raw.split('\n');
+      const title = (lines[0] || '').trim().slice(0, 120) || 'Senza titolo';
+      const body = lines.length > 1 ? lines.slice(1).join('\n').trim() : raw;
+      items = [{ title, body }];
+    }
+    items = items.filter((a) => a && typeof a === 'object');
+    if (!items.length) {
+      setImportError('Nessun articolo trovato nel testo incollato.');
       return;
     }
     const now = Date.now();
-    const newArticles = parsed.map((a, i) => ({
+    const newArticles = items.map((a, i) => ({
       id: 'custom-' + now + '-' + i,
       title: a.title || '',
       source: a.source || '',
@@ -1024,14 +1072,20 @@ function Keter() {
       body: a.body || '',
     }));
     const updated = [...articles, ...newArticles];
+    // 1. Stato locale, subito.
+    setArticles(updated);
+    setSessionArticles((prev) => {
+      const next = { ...prev };
+      newArticles.forEach((a) => { next[a.id] = a; });
+      return next;
+    });
+    setImporting(false);
+    setImportText('');
+    // 2. window.storage best-effort.
     try {
       await window.storage.set('keter-articles', JSON.stringify(updated), false);
-      setArticles(updated);
-      setImporting(false);
-      setImportText('');
-      setImportError('');
     } catch (err) {
-      setImportError('Errore nel salvataggio: ' + err.message);
+      // resta comunque in sessionArticles, pubblicabile
     }
   };
 
@@ -2026,7 +2080,7 @@ function Keter() {
                       cursor: 'pointer',
                     }}
                   >
-                    <Save size={13} /> {articleSaveState === 'saving' ? 'Salvo…' : articleSaveState === 'saved' ? 'Salvato ✓' : 'Salva'}
+                    <Save size={13} /> {articleSaveState === 'saving' ? 'Salvo…' : articleSaveState === 'saved' ? 'Salvato ✓' : articleSaveState === 'saved-local' ? 'Salvato (sessione) ✓' : 'Salva'}
                   </button>
                 </>
               )}
@@ -2279,7 +2333,7 @@ function Keter() {
             </div>
 
             <div style={{ fontSize: 13, color: '#a89c81', marginBottom: 12, fontFamily: "'Inter', sans-serif", lineHeight: 1.6 }}>
-              Incolla un array JSON di articoli. Ogni oggetto può avere: title, source, tags (separati da virgola), relatedWords (parole ebraiche separate da virgola), body.
+              Incolla articoli in JSON — un array [...], un singolo oggetto o {'{ articoli: [...] }'} — oppure semplice testo: in quel caso la prima riga diventa il titolo e il resto il corpo. Campi riconosciuti: title, source, tags, relatedWords, body.
             </div>
 
             <textarea
@@ -2948,7 +3002,7 @@ function Keter() {
             ) : (
               <>
                 <div style={{ fontSize: 13, color: '#a89c81', marginBottom: 12, fontFamily: "'Inter', sans-serif", lineHeight: 1.6 }}>
-                  Le voci del lessico e i testi creati o modificati in questa sessione. «Pubblica su GitHub» li salva in modo permanente nel repository (file modifiche.json), rendendoli disponibili su tutti i dispositivi. In alternativa puoi copiare il JSON come copia di riserva.
+                  Le voci del lessico, i testi e gli articoli creati o modificati in questa sessione. «Pubblica su GitHub» li salva in modo permanente nel repository (file modifiche.json), rendendoli disponibili su tutti i dispositivi. In alternativa puoi copiare il JSON come copia di riserva.
                 </div>
                 <button
                   onClick={publishToGithub}
