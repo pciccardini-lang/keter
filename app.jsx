@@ -71,36 +71,6 @@ function mergeTextsList(base, list) {
   return updated.concat(list.filter((x) => x && x.id !== undefined && !ids.has(x.id)));
 }
 
-// ---------- Eliminazioni (tombstone) ----------
-// Le eliminazioni vengono registrate per id in { lessico, testi, articoli },
-// così valgono anche per gli elementi seed e sopravvivono alla pubblicazione.
-function normalizeDeletes(d) {
-  return {
-    lessico: Array.isArray(d && d.lessico) ? d.lessico : [],
-    testi: Array.isArray(d && d.testi) ? d.testi : [],
-    articoli: Array.isArray(d && d.articoli) ? d.articoli : [],
-  };
-}
-
-function unionIds(a, b) {
-  const seen = new Set(a.map(String));
-  return [...a, ...b.filter((id) => !seen.has(String(id)))];
-}
-
-function addUniqueId(list, id) {
-  return list.some((x) => String(x) === String(id)) ? list : [...list, id];
-}
-
-function removeIdFrom(list, id) {
-  return list.filter((x) => String(x) !== String(id));
-}
-
-function filterDeleted(list, ids) {
-  if (!ids || !ids.length) return list;
-  const set = new Set(ids.map(String));
-  return list.filter((x) => !set.has(String(x.id)));
-}
-
 const KETER_DATA = window.KETER_DATA;
 
 
@@ -132,6 +102,7 @@ function FieldText({ text }) {
       dir={heb ? 'rtl' : 'ltr'}
       style={{
         fontFamily: heb ? "'Frank Ruhl Libre', 'David Libre', serif" : "'Cormorant Garamond', Georgia, serif",
+        fontWeight: heb ? 400 : 500,
         whiteSpace: 'pre-wrap',
         lineHeight: 1.6,
       }}
@@ -160,8 +131,6 @@ function Keter() {
   const [publishError, setPublishError] = useState('');
 
   const [articles, setArticles] = useState(ARTICLES_SEED);
-  const [sessionArticles, setSessionArticles] = useState({});
-  const [sessionDeletes, setSessionDeletes] = useState({ lessico: [], testi: [], articoli: [] });
   const [articleQuery, setArticleQuery] = useState('');
   const [selectedArticle, setSelectedArticle] = useState(null);
   const [editingArticle, setEditingArticle] = useState(false);
@@ -213,49 +182,40 @@ function Keter() {
       } catch (err) {
         localTexts = null;
       }
-      // 2b. eliminazioni: pubblicate + locali del dispositivo
-      let localDeletes = normalizeDeletes(null);
-      try {
-        const r = await window.storage.get('keter-deletes', false);
-        if (r && r.value) localDeletes = normalizeDeletes(JSON.parse(r.value));
-      } catch (err) {
-        localDeletes = normalizeDeletes(null);
-      }
-      const pubDeletes = normalizeDeletes(published && published.eliminati);
-      const del = {
-        lessico: unionIds(pubDeletes.lessico, localDeletes.lessico),
-        testi: unionIds(pubDeletes.testi, localDeletes.testi),
-        articoli: unionIds(pubDeletes.articoli, localDeletes.articoli),
-      };
-      // 3. lessico: dati base -> pubblicate -> locali -> eliminazioni
+      // 3. lessico: dati base -> pubblicate -> locali
       setEntries((base) => {
         let next = base;
         if (published && published.lessico) next = applyEditsToEntries(next, published.lessico);
         if (localEdits && Object.keys(localEdits).length) next = applyEditsToEntries(next, localEdits);
-        return filterDeleted(next, del.lessico);
+        return next;
       });
-      // 4. testi: seed -> pubblicati -> locali -> eliminazioni
+      // 4. testi: seed -> pubblicati -> locali
       setTexts(() => {
         let next = TEXTS_SEED;
         if (published && Array.isArray(published.testi)) next = mergeTextsList(next, published.testi);
         if (Array.isArray(localTexts)) next = mergeTextsList(next, localTexts);
-        return filterDeleted(next, del.testi);
-      });
-      // 5. articoli: seed -> pubblicati -> locali -> eliminazioni
-      let localArticles = null;
-      try {
-        const r = await window.storage.get('keter-articles', false);
-        if (r && r.value) localArticles = JSON.parse(r.value);
-      } catch (err) {
-        localArticles = null;
-      }
-      setArticles(() => {
-        let next = ARTICLES_SEED;
-        if (published && Array.isArray(published.articoli)) next = mergeTextsList(next, published.articoli);
-        if (Array.isArray(localArticles)) next = mergeTextsList(next, localArticles);
-        return filterDeleted(next, del.articoli);
+        return next;
       });
       setLoaded(true);
+    })();
+  }, []);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const result = await window.storage.get('keter-articles', false);
+        if (result && result.value) {
+          const saved = JSON.parse(result.value);
+          const seedIds = new Set(ARTICLES_SEED.map((a) => a.id));
+          const overrides = saved.filter((a) => seedIds.has(a.id));
+          const custom = saved.filter((a) => !seedIds.has(a.id));
+          setArticles(
+            ARTICLES_SEED.map((a) => overrides.find((o) => o.id === a.id) || a).concat(custom)
+          );
+        }
+      } catch (err) {
+        // nessun articolo salvato ancora
+      }
     })();
   }, []);
 
@@ -269,7 +229,7 @@ function Keter() {
 
   const tagColor = useCallback((tag) => {
     if (!tag) return '#8a8a8a';
-    const palette = ['#e8b62a', '#8fae7d', '#a3714f', '#7b8fae', '#b06a8f', '#c98f4b'];
+    const palette = ['#c9a24b', '#8fae7d', '#a3714f', '#7b8fae', '#b06a8f', '#c98f4b'];
     let hash = 0;
     for (let i = 0; i < tag.length; i++) hash = tag.charCodeAt(i) + ((hash << 5) - hash);
     return palette[Math.abs(hash) % palette.length];
@@ -343,7 +303,6 @@ function Keter() {
     );
     setSelected(saved);
     setSessionEdits((prev) => ({ ...prev, [saved.id]: saved }));
-    unrecordDelete('lessico', saved.id);
     setEditing(false);
     setSaveState('saving');
 
@@ -368,100 +327,6 @@ function Keter() {
     setTimeout(() => setSaveState('idle'), 2000);
   };
 
-  // ---------- Eliminazione ----------
-
-  // Registra un'eliminazione (sessione + storage locale best-effort).
-  const recordDelete = async (kind, id) => {
-    setSessionDeletes((prev) => ({ ...prev, [kind]: addUniqueId(prev[kind], id) }));
-    try {
-      let stored = normalizeDeletes(null);
-      try {
-        const r = await window.storage.get('keter-deletes', false);
-        if (r && r.value) stored = normalizeDeletes(JSON.parse(r.value));
-      } catch (e) {}
-      stored[kind] = addUniqueId(stored[kind], id);
-      await window.storage.set('keter-deletes', JSON.stringify(stored), false);
-    } catch (err) {
-      // resta comunque registrata in sessione
-    }
-  };
-
-  // Rimuove un'eliminazione (quando un elemento con lo stesso id viene risalvato).
-  const unrecordDelete = async (kind, id) => {
-    setSessionDeletes((prev) => ({ ...prev, [kind]: removeIdFrom(prev[kind], id) }));
-    try {
-      let stored = normalizeDeletes(null);
-      try {
-        const r = await window.storage.get('keter-deletes', false);
-        if (r && r.value) stored = normalizeDeletes(JSON.parse(r.value));
-      } catch (e) {}
-      stored[kind] = removeIdFrom(stored[kind], id);
-      await window.storage.set('keter-deletes', JSON.stringify(stored), false);
-    } catch (err) {}
-  };
-
-  const deleteEntry = async () => {
-    if (!selected) return;
-    if (!window.confirm('Eliminare questa voce dal Lessico? Con la prossima pubblicazione sparirà anche dagli altri dispositivi.')) return;
-    const id = selected.id;
-    setEntries((base) => base.filter((e) => e.id !== id));
-    setSessionEdits((prev) => {
-      const next = { ...prev };
-      delete next[id];
-      return next;
-    });
-    closeModal();
-    recordDelete('lessico', id);
-    // togli anche dalle modifiche locali salvate, se presente
-    try {
-      let existing = {};
-      try {
-        const r = await window.storage.get('keter-edits', false);
-        if (r && r.value) existing = JSON.parse(r.value);
-      } catch (e) {}
-      if (existing[id] !== undefined) {
-        delete existing[id];
-        await window.storage.set('keter-edits', JSON.stringify(existing), false);
-      }
-    } catch (err) {}
-  };
-
-  const deleteText = async () => {
-    if (!selectedText) return;
-    if (!window.confirm('Eliminare questo testo? Con la prossima pubblicazione sparirà anche dagli altri dispositivi.')) return;
-    const id = selectedText.id;
-    const updated = texts.filter((t) => t.id !== id);
-    setTexts(updated);
-    setSessionTexts((prev) => {
-      const next = { ...prev };
-      delete next[id];
-      return next;
-    });
-    closeTextModal();
-    recordDelete('testi', id);
-    try {
-      await window.storage.set('keter-texts', JSON.stringify(updated), false);
-    } catch (err) {}
-  };
-
-  const deleteArticle = async () => {
-    if (!selectedArticle) return;
-    if (!window.confirm('Eliminare questo articolo? Con la prossima pubblicazione sparirà anche dagli altri dispositivi.')) return;
-    const id = selectedArticle.id;
-    const updated = articles.filter((a) => a.id !== id);
-    setArticles(updated);
-    setSessionArticles((prev) => {
-      const next = { ...prev };
-      delete next[id];
-      return next;
-    });
-    closeArticleModal();
-    recordDelete('articoli', id);
-    try {
-      await window.storage.set('keter-articles', JSON.stringify(updated), false);
-    } catch (err) {}
-  };
-
   const applyEditsMap = (edits) => {
     setEntries((base) => applyEditsToEntries(base, edits));
     setSessionEdits((prev) => ({ ...prev, ...edits }));
@@ -484,14 +349,10 @@ function Keter() {
       const parsed = JSON.parse(editsImportText);
       let map = {};
       let textsList = [];
-      let articlesList = [];
-      let delList = normalizeDeletes(null);
-      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed) && (parsed.lessico || parsed.testi || parsed.articoli || parsed.eliminati)) {
-        // nuovo formato: { lessico: {...}, testi: [...], articoli: [...], eliminati: {...} }
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed) && (parsed.lessico || parsed.testi)) {
+        // nuovo formato: { lessico: {...}, testi: [...] }
         map = parsed.lessico || {};
         textsList = Array.isArray(parsed.testi) ? parsed.testi : [];
-        articlesList = Array.isArray(parsed.articoli) ? parsed.articoli : [];
-        delList = normalizeDeletes(parsed.eliminati);
       } else if (Array.isArray(parsed)) {
         parsed.forEach((e) => {
           if (e && e.id !== undefined) map[e.id] = e;
@@ -501,29 +362,10 @@ function Keter() {
       } else {
         throw new Error('formato non valido');
       }
-      const nDel = delList.lessico.length + delList.testi.length + delList.articoli.length;
-      const n = Object.keys(map).length + textsList.length + articlesList.length + nDel;
+      const n = Object.keys(map).length + textsList.length;
       if (!n) throw new Error('nessuna modifica trovata');
       if (Object.keys(map).length) applyEditsMap(map);
       if (textsList.length) applyTextsList(textsList);
-      if (articlesList.length) {
-        setArticles((base) => mergeTextsList(base, articlesList));
-        setSessionArticles((prev) => {
-          const next = { ...prev };
-          articlesList.forEach((a) => { if (a && a.id !== undefined) next[a.id] = a; });
-          return next;
-        });
-      }
-      if (nDel) {
-        setEntries((base) => filterDeleted(base, delList.lessico));
-        setTexts((base) => filterDeleted(base, delList.testi));
-        setArticles((base) => filterDeleted(base, delList.articoli));
-        setSessionDeletes((prev) => ({
-          lessico: unionIds(prev.lessico, delList.lessico),
-          testi: unionIds(prev.testi, delList.testi),
-          articoli: unionIds(prev.articoli, delList.articoli),
-        }));
-      }
       setEditsImportText('');
       setEditsPanel(null);
     } catch (err) {
@@ -573,7 +415,7 @@ function Keter() {
       };
       // 1. Legge la versione corrente del file (sha + contenuto), se esiste.
       let sha = null;
-      let remote = { lessico: {}, testi: [], articoli: [], eliminati: normalizeDeletes(null) };
+      let remote = { lessico: {}, testi: [] };
       const getResp = await fetch(apiUrl + '?ref=' + GH_BRANCH + '&t=' + Date.now(), { headers });
       if (getResp.status === 200) {
         const info = await getResp.json();
@@ -583,8 +425,6 @@ function Keter() {
           if (parsed && typeof parsed === 'object') {
             remote.lessico = parsed.lessico || {};
             remote.testi = Array.isArray(parsed.testi) ? parsed.testi : [];
-            remote.articoli = Array.isArray(parsed.articoli) ? parsed.articoli : [];
-            remote.eliminati = normalizeDeletes(parsed.eliminati);
           }
         } catch (e) {
           // contenuto illeggibile: verrà riscritto da zero
@@ -599,26 +439,7 @@ function Keter() {
       const mergedLessico = { ...remote.lessico, ...sessionEdits };
       const textMap = new Map(remote.testi.filter((t) => t && t.id !== undefined).map((t) => [t.id, t]));
       Object.values(sessionTexts).forEach((t) => { if (t && t.id !== undefined) textMap.set(t.id, t); });
-      const articleMap = new Map(remote.articoli.filter((a) => a && a.id !== undefined).map((a) => [a.id, a]));
-      Object.values(sessionArticles).forEach((a) => { if (a && a.id !== undefined) articleMap.set(a.id, a); });
-      // Eliminazioni: unione remoto + sessione; un id risalvato in sessione
-      // non deve restare tra gli eliminati (l'ultima azione vince).
-      const mergedDeletes = {
-        lessico: unionIds(remote.eliminati.lessico, sessionDeletes.lessico),
-        testi: unionIds(remote.eliminati.testi, sessionDeletes.testi),
-        articoli: unionIds(remote.eliminati.articoli, sessionDeletes.articoli),
-      };
-      Object.keys(sessionEdits).forEach((id) => { mergedDeletes.lessico = removeIdFrom(mergedDeletes.lessico, id); });
-      Object.keys(sessionTexts).forEach((id) => { mergedDeletes.testi = removeIdFrom(mergedDeletes.testi, id); });
-      Object.keys(sessionArticles).forEach((id) => { mergedDeletes.articoli = removeIdFrom(mergedDeletes.articoli, id); });
-      // Coerenza del file: un id eliminato non deve comparire anche nei contenuti.
-      mergedDeletes.lessico.forEach((id) => { delete mergedLessico[id]; });
-      const merged = {
-        lessico: mergedLessico,
-        testi: filterDeleted(Array.from(textMap.values()), mergedDeletes.testi),
-        articoli: filterDeleted(Array.from(articleMap.values()), mergedDeletes.articoli),
-        eliminati: mergedDeletes,
-      };
+      const merged = { lessico: mergedLessico, testi: Array.from(textMap.values()) };
       // 3. Scrive il file aggiornato (lo crea se non esiste).
       const putResp = await fetch(apiUrl, {
         method: 'PUT',
@@ -640,8 +461,6 @@ function Keter() {
       }
       setSessionEdits({});
       setSessionTexts({});
-      setSessionArticles({});
-      setSessionDeletes({ lessico: [], testi: [], articoli: [] });
       setPublishState('published');
       setTimeout(() => setPublishState('idle'), 5000);
     } catch (err) {
@@ -786,21 +605,10 @@ function Keter() {
   }, [texts, textQuery, view, textBodiesIndex]);
 
   const exportPayload = useMemo(
-    () => ({
-      lessico: sessionEdits,
-      testi: Object.values(sessionTexts),
-      articoli: Object.values(sessionArticles),
-      eliminati: sessionDeletes,
-    }),
-    [sessionEdits, sessionTexts, sessionArticles, sessionDeletes]
+    () => ({ lessico: sessionEdits, testi: Object.values(sessionTexts) }),
+    [sessionEdits, sessionTexts]
   );
-  const pendingCount =
-    Object.keys(sessionEdits).length +
-    Object.keys(sessionTexts).length +
-    Object.keys(sessionArticles).length +
-    sessionDeletes.lessico.length +
-    sessionDeletes.testi.length +
-    sessionDeletes.articoli.length;
+  const pendingCount = Object.keys(sessionEdits).length + Object.keys(sessionTexts).length;
 
   const openText = (t, withQuery = '') => {
     setSelectedText(t);
@@ -1006,7 +814,6 @@ function Keter() {
     setTexts(updated);
     setSelectedText(saved);
     setSessionTexts((prev) => ({ ...prev, [saved.id]: saved }));
-    unrecordDelete('testi', saved.id);
     setEditingText(false);
     setTextSaveState('saving');
     // 2. window.storage best-effort.
@@ -1055,8 +862,8 @@ function Keter() {
                   ...(highlighted
                     ? {
                         cursor: 'pointer',
-                        color: '#ffd24d',
-                        borderBottom: '1px solid #e8b62a',
+                        color: '#e9c97a',
+                        borderBottom: '1px solid #c9a24b',
                         paddingBottom: 1,
                       }
                     : {
@@ -1066,13 +873,13 @@ function Keter() {
                       }),
                   ...(searchHit
                     ? {
-                        background: '#ffd24d',
+                        background: '#e9c97a',
                         color: '#1c1408',
                         fontWeight: 700,
                         borderRadius: 4,
                         padding: '0 4px',
-                        borderBottom: '2px solid #e8b62a',
-                        boxShadow: '0 0 6px #ffd24d88',
+                        borderBottom: '2px solid #c9a24b',
+                        boxShadow: '0 0 6px #e9c97a88',
                       }
                     : {}),
                 }}
@@ -1174,25 +981,14 @@ function Keter() {
   const saveArticle = async () => {
     setArticleSaveState('saving');
     try {
-      const saved = { ...articleDraft };
-      const isNew = !articles.find((a) => a.id === saved.id);
-      const updated = isNew ? [...articles, saved] : articles.map((a) => (a.id === saved.id ? saved : a));
-      // 1. Stato locale, subito.
+      const isNew = !articles.find((a) => a.id === articleDraft.id);
+      const updated = isNew ? [...articles, articleDraft] : articles.map((a) => (a.id === articleDraft.id ? articleDraft : a));
+      await window.storage.set('keter-articles', JSON.stringify(updated), false);
       setArticles(updated);
-      setSelectedArticle(saved);
-      setSessionArticles((prev) => ({ ...prev, [saved.id]: saved }));
-      unrecordDelete('articoli', saved.id);
+      setSelectedArticle(articleDraft);
       setEditingArticle(false);
-      // 2. window.storage best-effort.
-      let persisted = false;
-      try {
-        const res = await window.storage.set('keter-articles', JSON.stringify(updated), false);
-        persisted = !!res;
-      } catch (err) {
-        persisted = false;
-      }
-      setArticleSaveState(persisted ? 'saved' : 'saved-local');
-      setTimeout(() => setArticleSaveState('idle'), 2000);
+      setArticleSaveState('saved');
+      setTimeout(() => setArticleSaveState('idle'), 1500);
     } catch (err) {
       setArticleSaveState('error');
     }
@@ -1211,39 +1007,16 @@ function Keter() {
   };
 
   const submitImport = async () => {
-    setImportError('');
-    const raw = importText.trim();
-    if (!raw) return;
-    // Formato flessibile: array JSON, singolo oggetto, { articoli: [...] },
-    // oppure testo semplice (prima riga = titolo, resto = corpo).
-    let items = null;
-    let parsed = null;
-    try { parsed = JSON.parse(raw); } catch (err) { parsed = null; }
-    if (parsed && typeof parsed === 'object') {
-      if (Array.isArray(parsed)) items = parsed;
-      else if (Array.isArray(parsed.articoli)) items = parsed.articoli;
-      else if (Array.isArray(parsed.articles)) items = parsed.articles;
-      else if (parsed.lessico || parsed.testi) {
-        setImportError('Questo è il JSON delle modifiche di sessione: incollalo nel pannello con l\u2019icona \u2191 in alto, non qui.');
-        return;
-      } else if (parsed.title || parsed.body) items = [parsed];
-      else {
-        setImportError('JSON riconosciuto ma senza articoli: serve un array [...], un oggetto { articoli: [...] } o un singolo articolo con title/body.');
-        return;
-      }
-    } else {
-      const lines = raw.split('\n');
-      const title = (lines[0] || '').trim().slice(0, 120) || 'Senza titolo';
-      const body = lines.length > 1 ? lines.slice(1).join('\n').trim() : raw;
-      items = [{ title, body }];
-    }
-    items = items.filter((a) => a && typeof a === 'object');
-    if (!items.length) {
-      setImportError('Nessun articolo trovato nel testo incollato.');
+    let parsed;
+    try {
+      parsed = JSON.parse(importText);
+      if (!Array.isArray(parsed)) throw new Error('Il testo deve essere un array JSON di articoli.');
+    } catch (err) {
+      setImportError('JSON non valido: ' + err.message);
       return;
     }
     const now = Date.now();
-    const newArticles = items.map((a, i) => ({
+    const newArticles = parsed.map((a, i) => ({
       id: 'custom-' + now + '-' + i,
       title: a.title || '',
       source: a.source || '',
@@ -1252,20 +1025,14 @@ function Keter() {
       body: a.body || '',
     }));
     const updated = [...articles, ...newArticles];
-    // 1. Stato locale, subito.
-    setArticles(updated);
-    setSessionArticles((prev) => {
-      const next = { ...prev };
-      newArticles.forEach((a) => { next[a.id] = a; });
-      return next;
-    });
-    setImporting(false);
-    setImportText('');
-    // 2. window.storage best-effort.
     try {
       await window.storage.set('keter-articles', JSON.stringify(updated), false);
+      setArticles(updated);
+      setImporting(false);
+      setImportText('');
+      setImportError('');
     } catch (err) {
-      // resta comunque in sessionArticles, pubblicabile
+      setImportError('Errore nel salvataggio: ' + err.message);
     }
   };
 
@@ -1281,12 +1048,12 @@ function Keter() {
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=Frank+Ruhl+Libre:wght@400;500;700&family=Cormorant+Garamond:ital,wght@0,400;0,500;0,600;1,400&family=Inter:wght@400;500;600&display=swap');
         * { box-sizing: border-box; }
-        ::selection { background: #e8b62a55; }
+        ::selection { background: #c9a24b55; }
         .keter-scroll::-webkit-scrollbar { width: 8px; }
         .keter-scroll::-webkit-scrollbar-thumb { background: #6ba57a; border-radius: 4px; }
         .keter-scroll::-webkit-scrollbar-track { background: transparent; }
         button:focus-visible, input:focus-visible, textarea:focus-visible {
-          outline: 2px solid #e8b62a;
+          outline: 2px solid #c9a24b;
           outline-offset: 2px;
         }
         @media (prefers-reduced-motion: reduce) {
@@ -1307,7 +1074,7 @@ function Keter() {
         }}
       >
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 14 }}>
-          <Crown size={22} color="#e8b62a" strokeWidth={1.5} />
+          <Crown size={22} color="#c9a24b" strokeWidth={1.5} />
           <h1
             style={{
               margin: 0,
@@ -1318,7 +1085,7 @@ function Keter() {
               color: '#f0e4c8',
             }}
           >
-            Keter <span style={{ color: '#e8b62a', fontSize: 18 }}>כֶּתֶר</span>
+            Keter <span style={{ color: '#c9a24b', fontSize: 18 }}>כֶּתֶר</span>
           </h1>
           <span style={{ marginLeft: 'auto', fontSize: 13, color: '#8a7f68', fontFamily: "'Inter', sans-serif" }}>
             {view === 'lexicon' ? `${filtered.length} / ${entries.length}` : view === 'articles' ? `${filteredArticles.length} / ${articles.length}` : `${filteredTexts.length} testi`}
@@ -1331,7 +1098,7 @@ function Keter() {
               background: 'none',
               border: '1px solid #487d58',
               borderRadius: 8,
-              color: pendingCount ? '#ffd24d' : '#8a7f68',
+              color: pendingCount ? '#e9c97a' : '#8a7f68',
               padding: '5px 7px',
               cursor: 'pointer',
               display: 'flex',
@@ -1345,7 +1112,7 @@ function Keter() {
                   position: 'absolute',
                   top: -6,
                   right: -6,
-                  background: '#e8b62a',
+                  background: '#c9a24b',
                   color: '#1a2b20',
                   borderRadius: 999,
                   fontSize: 10,
@@ -1400,9 +1167,9 @@ function Keter() {
                 fontSize: 12,
                 padding: '8px 4px',
                 borderRadius: 8,
-                border: `1px solid ${view === id ? '#e8b62a' : '#67a377'}`,
-                background: view === id ? '#e8b62a22' : 'transparent',
-                color: view === id ? '#ffd24d' : '#a89c81',
+                border: `1px solid ${view === id ? '#c9a24b' : '#67a377'}`,
+                background: view === id ? '#c9a24b22' : 'transparent',
+                color: view === id ? '#e9c97a' : '#a89c81',
                 cursor: 'pointer',
                 whiteSpace: 'nowrap',
               }}
@@ -1459,9 +1226,9 @@ function Keter() {
                 fontSize: 12,
                 padding: '5px 11px',
                 borderRadius: 999,
-                border: `1px solid ${activeTag === 'all' ? '#e8b62a' : '#67a377'}`,
-                background: activeTag === 'all' ? '#e8b62a22' : 'transparent',
-                color: activeTag === 'all' ? '#ffd24d' : '#8a7f68',
+                border: `1px solid ${activeTag === 'all' ? '#c9a24b' : '#67a377'}`,
+                background: activeTag === 'all' ? '#c9a24b22' : 'transparent',
+                color: activeTag === 'all' ? '#e9c97a' : '#8a7f68',
                 whiteSpace: 'nowrap',
                 cursor: 'pointer',
               }}
@@ -1619,11 +1386,11 @@ function Keter() {
                     }}
                   >
                     <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ fontSize: 18 }}>
+                      <div style={{ fontSize: 21, fontWeight: 500, color: '#f0e4c8' }}>
                         <FieldText text={e.Parola} />
                       </div>
                       {e.Traduzione && (
-                        <div style={{ fontSize: 14, color: '#a89c81', marginTop: 3 }}>
+                        <div style={{ fontSize: 16, color: '#e9c97a', marginTop: 4 }}>
                           <FieldText text={e.Traduzione} />
                         </div>
                       )}
@@ -1721,7 +1488,7 @@ function Keter() {
                   }}
                 >
                   <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
-                    <BookOpen size={16} color="#e8b62a" style={{ marginTop: 3, flexShrink: 0 }} />
+                    <BookOpen size={16} color="#c9a24b" style={{ marginTop: 3, flexShrink: 0 }} />
                     <div style={{ flex: 1, minWidth: 0 }}>
                       <div style={{ fontSize: 16, fontFamily: "'Frank Ruhl Libre', serif", color: '#f0e4c8' }}>
                         {a.title || 'Senza titolo'}
@@ -1809,9 +1576,9 @@ function Keter() {
                 >
                   <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
                     {view === 'agnon' ? (
-                      <Feather size={16} color="#e8b62a" style={{ marginTop: 3, flexShrink: 0 }} />
+                      <Feather size={16} color="#c9a24b" style={{ marginTop: 3, flexShrink: 0 }} />
                     ) : (
-                      <PenLine size={16} color="#e8b62a" style={{ marginTop: 3, flexShrink: 0 }} />
+                      <PenLine size={16} color="#c9a24b" style={{ marginTop: 3, flexShrink: 0 }} />
                     )}
                     <div style={{ flex: 1, minWidth: 0 }}>
                       <div style={{ fontSize: 16, fontFamily: "'Frank Ruhl Libre', serif", color: '#f0e4c8' }}>
@@ -1841,12 +1608,12 @@ function Keter() {
                         {textMatches.get(t.id).before}
                         <span
                           style={{
-                            background: '#ffd24d',
+                            background: '#e9c97a',
                             color: '#1c1408',
                             fontWeight: 700,
                             borderRadius: 4,
                             padding: '0 4px',
-                            borderBottom: '2px solid #e8b62a',
+                            borderBottom: '2px solid #c9a24b',
                           }}
                         >
                           {textMatches.get(t.id).hit}
@@ -1942,32 +1709,13 @@ function Keter() {
           >
             <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginBottom: 8 }}>
               {!editing ? (
-                <>
-                <button
-                  onClick={deleteEntry}
-                  style={{
-                    background: 'none',
-                    border: '1px solid #a04b3e',
-                    borderRadius: 8,
-                    color: '#e08b7d',
-                    padding: '6px 10px',
-                    fontSize: 12,
-                    fontFamily: "'Inter', sans-serif",
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: 5,
-                    cursor: 'pointer',
-                  }}
-                >
-                  <X size={13} /> Elimina
-                </button>
                 <button
                   onClick={startEdit}
                   style={{
                     background: 'none',
                     border: '1px solid #67a377',
                     borderRadius: 8,
-                    color: '#e8b62a',
+                    color: '#c9a24b',
                     padding: '6px 10px',
                     fontSize: 12,
                     fontFamily: "'Inter', sans-serif",
@@ -1979,7 +1727,6 @@ function Keter() {
                 >
                   <Edit3 size={13} /> Modifica
                 </button>
-                </>
               ) : (
                 <>
                   <button
@@ -2003,10 +1750,10 @@ function Keter() {
                   <button
                     onClick={saveEdit}
                     style={{
-                      background: '#e8b62a22',
-                      border: '1px solid #e8b62a',
+                      background: '#c9a24b22',
+                      border: '1px solid #c9a24b',
                       borderRadius: 8,
-                      color: '#ffd24d',
+                      color: '#e9c97a',
                       padding: '6px 10px',
                       fontSize: 12,
                       fontFamily: "'Inter', sans-serif",
@@ -2029,7 +1776,7 @@ function Keter() {
               </button>
             </div>
 
-            <div style={{ fontSize: 26, marginBottom: 4 }}>
+            <div style={{ fontSize: 30, marginBottom: 6 }}>
               {editing ? (
                 <input
                   value={draft.Parola || ''}
@@ -2052,7 +1799,7 @@ function Keter() {
               )}
             </div>
 
-            <div style={{ fontSize: 17, color: '#e8b62a', marginBottom: 18 }}>
+            <div style={{ fontSize: 19, color: '#c9a24b', marginBottom: 18 }}>
               {editing ? (
                 <input
                   value={draft.Traduzione || ''}
@@ -2064,7 +1811,7 @@ function Keter() {
                     background: '#3a6647',
                     border: '1px solid #67a377',
                     borderRadius: 8,
-                    color: '#ffd24d',
+                    color: '#e9c97a',
                     fontSize: 15,
                     padding: '7px 10px',
                     marginTop: 6,
@@ -2112,7 +1859,7 @@ function Keter() {
                       }}
                     />
                   ) : (
-                    <div style={{ fontSize: 15, color: '#cfc4a8' }}>
+                    <div style={{ fontSize: 16.5, color: '#cfc4a8' }}>
                       <FieldText text={value} />
                     </div>
                   )}
@@ -2148,9 +1895,9 @@ function Keter() {
                         fontSize: 13,
                         padding: '7px 11px',
                         borderRadius: 8,
-                        border: '1px solid #e8b62a66',
-                        background: '#e8b62a11',
-                        color: '#ffd24d',
+                        border: '1px solid #c9a24b66',
+                        background: '#c9a24b11',
+                        color: '#e9c97a',
                         cursor: 'pointer',
                       }}
                     >
@@ -2226,32 +1973,13 @@ function Keter() {
           >
             <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginBottom: 8 }}>
               {!editingArticle ? (
-                <>
-                <button
-                  onClick={deleteArticle}
-                  style={{
-                    background: 'none',
-                    border: '1px solid #a04b3e',
-                    borderRadius: 8,
-                    color: '#e08b7d',
-                    padding: '6px 10px',
-                    fontSize: 12,
-                    fontFamily: "'Inter', sans-serif",
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: 5,
-                    cursor: 'pointer',
-                  }}
-                >
-                  <X size={13} /> Elimina
-                </button>
                 <button
                   onClick={startEditArticle}
                   style={{
                     background: 'none',
                     border: '1px solid #67a377',
                     borderRadius: 8,
-                    color: '#e8b62a',
+                    color: '#c9a24b',
                     padding: '6px 10px',
                     fontSize: 12,
                     fontFamily: "'Inter', sans-serif",
@@ -2263,7 +1991,6 @@ function Keter() {
                 >
                   <Edit3 size={13} /> Modifica
                 </button>
-                </>
               ) : (
                 <>
                   <button
@@ -2287,10 +2014,10 @@ function Keter() {
                   <button
                     onClick={saveArticle}
                     style={{
-                      background: '#e8b62a22',
-                      border: '1px solid #e8b62a',
+                      background: '#c9a24b22',
+                      border: '1px solid #c9a24b',
                       borderRadius: 8,
-                      color: '#ffd24d',
+                      color: '#e9c97a',
                       padding: '6px 10px',
                       fontSize: 12,
                       fontFamily: "'Inter', sans-serif",
@@ -2300,7 +2027,7 @@ function Keter() {
                       cursor: 'pointer',
                     }}
                   >
-                    <Save size={13} /> {articleSaveState === 'saving' ? 'Salvo…' : articleSaveState === 'saved' ? 'Salvato ✓' : articleSaveState === 'saved-local' ? 'Salvato (sessione) ✓' : 'Salva'}
+                    <Save size={13} /> {articleSaveState === 'saving' ? 'Salvo…' : articleSaveState === 'saved' ? 'Salvato ✓' : 'Salva'}
                   </button>
                 </>
               )}
@@ -2335,7 +2062,7 @@ function Keter() {
               )}
             </div>
 
-            <div style={{ fontSize: 13, color: '#e8b62a', marginBottom: 18, fontFamily: "'Inter', sans-serif" }}>
+            <div style={{ fontSize: 13, color: '#c9a24b', marginBottom: 18, fontFamily: "'Inter', sans-serif" }}>
               {editingArticle ? (
                 <input
                   value={articleDraft.source || ''}
@@ -2346,7 +2073,7 @@ function Keter() {
                     background: '#142218',
                     border: '1px solid #67a377',
                     borderRadius: 8,
-                    color: '#ffd24d',
+                    color: '#e9c97a',
                     fontSize: 13,
                     padding: '7px 10px',
                     marginTop: 6,
@@ -2490,9 +2217,9 @@ function Keter() {
                         fontSize: 13,
                         padding: '5px 11px',
                         borderRadius: 999,
-                        border: '1px solid #e8b62a66',
-                        background: '#e8b62a11',
-                        color: '#ffd24d',
+                        border: '1px solid #c9a24b66',
+                        background: '#c9a24b11',
+                        color: '#e9c97a',
                         cursor: 'pointer',
                       }}
                     >
@@ -2553,7 +2280,7 @@ function Keter() {
             </div>
 
             <div style={{ fontSize: 13, color: '#a89c81', marginBottom: 12, fontFamily: "'Inter', sans-serif", lineHeight: 1.6 }}>
-              Incolla articoli in JSON — un array [...], un singolo oggetto o {'{ articoli: [...] }'} — oppure semplice testo: in quel caso la prima riga diventa il titolo e il resto il corpo. Campi riconosciuti: title, source, tags, relatedWords, body.
+              Incolla un array JSON di articoli. Ogni oggetto può avere: title, source, tags (separati da virgola), relatedWords (parole ebraiche separate da virgola), body.
             </div>
 
             <textarea
@@ -2585,10 +2312,10 @@ function Keter() {
               onClick={submitImport}
               disabled={!importText.trim()}
               style={{
-                background: '#e8b62a22',
-                border: '1px solid #e8b62a',
+                background: '#c9a24b22',
+                border: '1px solid #c9a24b',
                 borderRadius: 8,
-                color: '#ffd24d',
+                color: '#e9c97a',
                 padding: '8px 14px',
                 fontSize: 13,
                 fontFamily: "'Inter', sans-serif",
@@ -2671,10 +2398,10 @@ function Keter() {
                     }}
                     title="Cerca nel testo"
                     style={{
-                      background: readerSearchOpen ? '#e8b62a22' : 'none',
-                      border: readerSearchOpen ? '1px solid #e8b62a' : '1px solid #67a377',
+                      background: readerSearchOpen ? '#c9a24b22' : 'none',
+                      border: readerSearchOpen ? '1px solid #c9a24b' : '1px solid #67a377',
                       borderRadius: 8,
-                      color: readerSearchOpen ? '#ffd24d' : '#96c4a0',
+                      color: readerSearchOpen ? '#e9c97a' : '#96c4a0',
                       padding: '6px 10px',
                       fontSize: 12,
                       fontFamily: "'Inter', sans-serif",
@@ -2688,25 +2415,6 @@ function Keter() {
                   </button>
                 )}
                 {!editingText ? (
-                  <>
-                  <button
-                    onClick={deleteText}
-                    style={{
-                      background: 'none',
-                      border: '1px solid #a04b3e',
-                      borderRadius: 8,
-                      color: '#e08b7d',
-                      padding: '6px 10px',
-                      fontSize: 12,
-                      fontFamily: "'Inter', sans-serif",
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: 5,
-                      cursor: 'pointer',
-                    }}
-                  >
-                    <X size={13} /> Elimina
-                  </button>
                   <button
                     onClick={startEditText}
                     style={{
@@ -2725,15 +2433,14 @@ function Keter() {
                   >
                     <Edit3 size={13} /> Modifica
                   </button>
-                  </>
                 ) : (
                   <button
                     onClick={saveText}
                     style={{
-                      background: '#e8b62a22',
-                      border: '1px solid #e8b62a',
+                      background: '#c9a24b22',
+                      border: '1px solid #c9a24b',
                       borderRadius: 8,
-                      color: '#ffd24d',
+                      color: '#e9c97a',
                       padding: '6px 10px',
                       fontSize: 12,
                       fontFamily: "'Inter', sans-serif",
@@ -2796,9 +2503,9 @@ function Keter() {
                   style={{
                     width: '100%',
                     background: '#142218',
-                    border: '1px solid #e8b62a66',
+                    border: '1px solid #c9a24b66',
                     borderRadius: 8,
-                    color: '#ffd24d',
+                    color: '#e9c97a',
                     fontSize: 15,
                     padding: '8px 10px',
                     fontFamily: "'Frank Ruhl Libre', serif",
@@ -2839,7 +2546,7 @@ function Keter() {
                   <div
                     style={{
                       fontSize: 12,
-                      color: pdfState === 'error' ? '#c98f4b' : '#e8b62a',
+                      color: pdfState === 'error' ? '#c98f4b' : '#c9a24b',
                       fontFamily: "'Inter', sans-serif",
                       lineHeight: 1.5,
                     }}
@@ -3021,9 +2728,9 @@ function Keter() {
                             fontSize: 16,
                             padding: '3px 10px',
                             borderRadius: 999,
-                            border: '1px solid #e8b62a',
-                            background: '#e8b62a18',
-                            color: '#ffd24d',
+                            border: '1px solid #c9a24b',
+                            background: '#c9a24b18',
+                            color: '#e9c97a',
                             cursor: 'pointer',
                           }}
                         >
@@ -3082,14 +2789,14 @@ function Keter() {
               maxHeight: '60vh',
               overflowY: 'auto',
               background: '#0e1a13',
-              border: '1px solid #e8b62a',
+              border: '1px solid #c9a24b',
               borderBottom: 'none',
               borderRadius: '18px 18px 0 0',
               padding: '18px 20px 30px',
             }}
           >
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-              <div dir="rtl" style={{ fontSize: 24, fontFamily: "'Frank Ruhl Libre', serif", color: '#ffd24d' }}>
+              <div dir="rtl" style={{ fontSize: 24, fontFamily: "'Frank Ruhl Libre', serif", color: '#e9c97a' }}>
                 {wordLookup.raw.replace(/[^\u0590-\u05FF"'׳״־]/g, '')}
               </div>
               <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
@@ -3097,10 +2804,10 @@ function Keter() {
                   <button
                     onClick={() => toggleLinkedWord(wordLookup.word)}
                     style={{
-                      background: wordInSet(wordLookup.word, linkedSetOf(selectedText)) ? '#e8b62a22' : 'none',
-                      border: '1px solid #e8b62a',
+                      background: wordInSet(wordLookup.word, linkedSetOf(selectedText)) ? '#c9a24b22' : 'none',
+                      border: '1px solid #c9a24b',
                       borderRadius: 8,
-                      color: '#ffd24d',
+                      color: '#e9c97a',
                       padding: '5px 10px',
                       fontSize: 11,
                       fontFamily: "'Inter', sans-serif",
@@ -3142,10 +2849,10 @@ function Keter() {
                       cursor: 'pointer',
                     }}
                   >
-                    <div dir="rtl" style={{ fontSize: 18, fontFamily: "'Frank Ruhl Libre', serif", color: '#f0e4c8', flexShrink: 0 }}>
+                    <div dir="rtl" style={{ fontSize: 20, fontWeight: 500, fontFamily: "'Frank Ruhl Libre', serif", color: '#f0e4c8', flexShrink: 0 }}>
                       {e.Parola}
                     </div>
-                    <div style={{ flex: 1, fontSize: 13, color: '#cfc4a8', fontFamily: "'Inter', sans-serif", minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    <div style={{ flex: 1, fontSize: 14, color: '#cfc4a8', fontFamily: "'Inter', sans-serif", minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                       {e.Traduzione || ''}
                     </div>
                     <ChevronRight size={15} color="#96c4a0" style={{ flexShrink: 0 }} />
@@ -3167,10 +2874,10 @@ function Keter() {
                   }}
                   style={{
                     width: '100%',
-                    background: '#e8b62a22',
-                    border: '1px solid #e8b62a',
+                    background: '#c9a24b22',
+                    border: '1px solid #c9a24b',
                     borderRadius: 8,
-                    color: '#ffd24d',
+                    color: '#e9c97a',
                     padding: '10px',
                     fontSize: 14,
                     fontFamily: "'Inter', sans-serif",
@@ -3242,15 +2949,15 @@ function Keter() {
             ) : (
               <>
                 <div style={{ fontSize: 13, color: '#a89c81', marginBottom: 12, fontFamily: "'Inter', sans-serif", lineHeight: 1.6 }}>
-                  Le voci del lessico, i testi e gli articoli creati, modificati o eliminati in questa sessione. «Pubblica su GitHub» li salva in modo permanente nel repository (file modifiche.json), rendendoli disponibili su tutti i dispositivi. In alternativa puoi copiare il JSON come copia di riserva.
+                  Le voci del lessico e i testi creati o modificati in questa sessione. «Pubblica su GitHub» li salva in modo permanente nel repository (file modifiche.json), rendendoli disponibili su tutti i dispositivi. In alternativa puoi copiare il JSON come copia di riserva.
                 </div>
                 <button
                   onClick={publishToGithub}
                   disabled={publishState === 'publishing'}
                   style={{
                     width: '100%',
-                    background: '#e8b62a',
-                    border: '1px solid #e8b62a',
+                    background: '#c9a24b',
+                    border: '1px solid #c9a24b',
                     borderRadius: 8,
                     color: '#1a2b20',
                     fontWeight: 600,
@@ -3295,10 +3002,10 @@ function Keter() {
                   onClick={copyEditsJson}
                   style={{
                     width: '100%',
-                    background: '#e8b62a22',
-                    border: '1px solid #e8b62a',
+                    background: '#c9a24b22',
+                    border: '1px solid #c9a24b',
                     borderRadius: 8,
-                    color: '#ffd24d',
+                    color: '#e9c97a',
                     padding: '10px',
                     fontSize: 14,
                     fontFamily: "'Inter', sans-serif",
@@ -3409,10 +3116,10 @@ function Keter() {
               onClick={submitEditsImport}
               style={{
                 width: '100%',
-                background: '#e8b62a22',
-                border: '1px solid #e8b62a',
+                background: '#c9a24b22',
+                border: '1px solid #c9a24b',
                 borderRadius: 8,
-                color: '#ffd24d',
+                color: '#e9c97a',
                 padding: '10px',
                 fontSize: 14,
                 fontFamily: "'Inter', sans-serif",
