@@ -71,6 +71,36 @@ function mergeTextsList(base, list) {
   return updated.concat(list.filter((x) => x && x.id !== undefined && !ids.has(x.id)));
 }
 
+// ---------- Eliminazioni (tombstone) ----------
+// Le eliminazioni vengono registrate per id in { lessico, testi, articoli },
+// così valgono anche per gli elementi seed e sopravvivono alla pubblicazione.
+function normalizeDeletes(d) {
+  return {
+    lessico: Array.isArray(d && d.lessico) ? d.lessico : [],
+    testi: Array.isArray(d && d.testi) ? d.testi : [],
+    articoli: Array.isArray(d && d.articoli) ? d.articoli : [],
+  };
+}
+
+function unionIds(a, b) {
+  const seen = new Set(a.map(String));
+  return [...a, ...b.filter((id) => !seen.has(String(id)))];
+}
+
+function addUniqueId(list, id) {
+  return list.some((x) => String(x) === String(id)) ? list : [...list, id];
+}
+
+function removeIdFrom(list, id) {
+  return list.filter((x) => String(x) !== String(id));
+}
+
+function filterDeleted(list, ids) {
+  if (!ids || !ids.length) return list;
+  const set = new Set(ids.map(String));
+  return list.filter((x) => !set.has(String(x.id)));
+}
+
 const KETER_DATA = window.KETER_DATA;
 
 
@@ -131,6 +161,7 @@ function Keter() {
 
   const [articles, setArticles] = useState(ARTICLES_SEED);
   const [sessionArticles, setSessionArticles] = useState({});
+  const [sessionDeletes, setSessionDeletes] = useState({ lessico: [], testi: [], articoli: [] });
   const [articleQuery, setArticleQuery] = useState('');
   const [selectedArticle, setSelectedArticle] = useState(null);
   const [editingArticle, setEditingArticle] = useState(false);
@@ -182,21 +213,35 @@ function Keter() {
       } catch (err) {
         localTexts = null;
       }
-      // 3. lessico: dati base -> pubblicate -> locali
+      // 2b. eliminazioni: pubblicate + locali del dispositivo
+      let localDeletes = normalizeDeletes(null);
+      try {
+        const r = await window.storage.get('keter-deletes', false);
+        if (r && r.value) localDeletes = normalizeDeletes(JSON.parse(r.value));
+      } catch (err) {
+        localDeletes = normalizeDeletes(null);
+      }
+      const pubDeletes = normalizeDeletes(published && published.eliminati);
+      const del = {
+        lessico: unionIds(pubDeletes.lessico, localDeletes.lessico),
+        testi: unionIds(pubDeletes.testi, localDeletes.testi),
+        articoli: unionIds(pubDeletes.articoli, localDeletes.articoli),
+      };
+      // 3. lessico: dati base -> pubblicate -> locali -> eliminazioni
       setEntries((base) => {
         let next = base;
         if (published && published.lessico) next = applyEditsToEntries(next, published.lessico);
         if (localEdits && Object.keys(localEdits).length) next = applyEditsToEntries(next, localEdits);
-        return next;
+        return filterDeleted(next, del.lessico);
       });
-      // 4. testi: seed -> pubblicati -> locali
+      // 4. testi: seed -> pubblicati -> locali -> eliminazioni
       setTexts(() => {
         let next = TEXTS_SEED;
         if (published && Array.isArray(published.testi)) next = mergeTextsList(next, published.testi);
         if (Array.isArray(localTexts)) next = mergeTextsList(next, localTexts);
-        return next;
+        return filterDeleted(next, del.testi);
       });
-      // 5. articoli: seed -> pubblicati -> locali
+      // 5. articoli: seed -> pubblicati -> locali -> eliminazioni
       let localArticles = null;
       try {
         const r = await window.storage.get('keter-articles', false);
@@ -208,7 +253,7 @@ function Keter() {
         let next = ARTICLES_SEED;
         if (published && Array.isArray(published.articoli)) next = mergeTextsList(next, published.articoli);
         if (Array.isArray(localArticles)) next = mergeTextsList(next, localArticles);
-        return next;
+        return filterDeleted(next, del.articoli);
       });
       setLoaded(true);
     })();
@@ -298,6 +343,7 @@ function Keter() {
     );
     setSelected(saved);
     setSessionEdits((prev) => ({ ...prev, [saved.id]: saved }));
+    unrecordDelete('lessico', saved.id);
     setEditing(false);
     setSaveState('saving');
 
@@ -320,6 +366,100 @@ function Keter() {
 
     setSaveState(persisted ? 'saved' : 'saved-local');
     setTimeout(() => setSaveState('idle'), 2000);
+  };
+
+  // ---------- Eliminazione ----------
+
+  // Registra un'eliminazione (sessione + storage locale best-effort).
+  const recordDelete = async (kind, id) => {
+    setSessionDeletes((prev) => ({ ...prev, [kind]: addUniqueId(prev[kind], id) }));
+    try {
+      let stored = normalizeDeletes(null);
+      try {
+        const r = await window.storage.get('keter-deletes', false);
+        if (r && r.value) stored = normalizeDeletes(JSON.parse(r.value));
+      } catch (e) {}
+      stored[kind] = addUniqueId(stored[kind], id);
+      await window.storage.set('keter-deletes', JSON.stringify(stored), false);
+    } catch (err) {
+      // resta comunque registrata in sessione
+    }
+  };
+
+  // Rimuove un'eliminazione (quando un elemento con lo stesso id viene risalvato).
+  const unrecordDelete = async (kind, id) => {
+    setSessionDeletes((prev) => ({ ...prev, [kind]: removeIdFrom(prev[kind], id) }));
+    try {
+      let stored = normalizeDeletes(null);
+      try {
+        const r = await window.storage.get('keter-deletes', false);
+        if (r && r.value) stored = normalizeDeletes(JSON.parse(r.value));
+      } catch (e) {}
+      stored[kind] = removeIdFrom(stored[kind], id);
+      await window.storage.set('keter-deletes', JSON.stringify(stored), false);
+    } catch (err) {}
+  };
+
+  const deleteEntry = async () => {
+    if (!selected) return;
+    if (!window.confirm('Eliminare questa voce dal Lessico? Con la prossima pubblicazione sparirà anche dagli altri dispositivi.')) return;
+    const id = selected.id;
+    setEntries((base) => base.filter((e) => e.id !== id));
+    setSessionEdits((prev) => {
+      const next = { ...prev };
+      delete next[id];
+      return next;
+    });
+    closeModal();
+    recordDelete('lessico', id);
+    // togli anche dalle modifiche locali salvate, se presente
+    try {
+      let existing = {};
+      try {
+        const r = await window.storage.get('keter-edits', false);
+        if (r && r.value) existing = JSON.parse(r.value);
+      } catch (e) {}
+      if (existing[id] !== undefined) {
+        delete existing[id];
+        await window.storage.set('keter-edits', JSON.stringify(existing), false);
+      }
+    } catch (err) {}
+  };
+
+  const deleteText = async () => {
+    if (!selectedText) return;
+    if (!window.confirm('Eliminare questo testo? Con la prossima pubblicazione sparirà anche dagli altri dispositivi.')) return;
+    const id = selectedText.id;
+    const updated = texts.filter((t) => t.id !== id);
+    setTexts(updated);
+    setSessionTexts((prev) => {
+      const next = { ...prev };
+      delete next[id];
+      return next;
+    });
+    closeTextModal();
+    recordDelete('testi', id);
+    try {
+      await window.storage.set('keter-texts', JSON.stringify(updated), false);
+    } catch (err) {}
+  };
+
+  const deleteArticle = async () => {
+    if (!selectedArticle) return;
+    if (!window.confirm('Eliminare questo articolo? Con la prossima pubblicazione sparirà anche dagli altri dispositivi.')) return;
+    const id = selectedArticle.id;
+    const updated = articles.filter((a) => a.id !== id);
+    setArticles(updated);
+    setSessionArticles((prev) => {
+      const next = { ...prev };
+      delete next[id];
+      return next;
+    });
+    closeArticleModal();
+    recordDelete('articoli', id);
+    try {
+      await window.storage.set('keter-articles', JSON.stringify(updated), false);
+    } catch (err) {}
   };
 
   const applyEditsMap = (edits) => {
@@ -345,11 +485,13 @@ function Keter() {
       let map = {};
       let textsList = [];
       let articlesList = [];
-      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed) && (parsed.lessico || parsed.testi || parsed.articoli)) {
-        // nuovo formato: { lessico: {...}, testi: [...], articoli: [...] }
+      let delList = normalizeDeletes(null);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed) && (parsed.lessico || parsed.testi || parsed.articoli || parsed.eliminati)) {
+        // nuovo formato: { lessico: {...}, testi: [...], articoli: [...], eliminati: {...} }
         map = parsed.lessico || {};
         textsList = Array.isArray(parsed.testi) ? parsed.testi : [];
         articlesList = Array.isArray(parsed.articoli) ? parsed.articoli : [];
+        delList = normalizeDeletes(parsed.eliminati);
       } else if (Array.isArray(parsed)) {
         parsed.forEach((e) => {
           if (e && e.id !== undefined) map[e.id] = e;
@@ -359,7 +501,8 @@ function Keter() {
       } else {
         throw new Error('formato non valido');
       }
-      const n = Object.keys(map).length + textsList.length + articlesList.length;
+      const nDel = delList.lessico.length + delList.testi.length + delList.articoli.length;
+      const n = Object.keys(map).length + textsList.length + articlesList.length + nDel;
       if (!n) throw new Error('nessuna modifica trovata');
       if (Object.keys(map).length) applyEditsMap(map);
       if (textsList.length) applyTextsList(textsList);
@@ -370,6 +513,16 @@ function Keter() {
           articlesList.forEach((a) => { if (a && a.id !== undefined) next[a.id] = a; });
           return next;
         });
+      }
+      if (nDel) {
+        setEntries((base) => filterDeleted(base, delList.lessico));
+        setTexts((base) => filterDeleted(base, delList.testi));
+        setArticles((base) => filterDeleted(base, delList.articoli));
+        setSessionDeletes((prev) => ({
+          lessico: unionIds(prev.lessico, delList.lessico),
+          testi: unionIds(prev.testi, delList.testi),
+          articoli: unionIds(prev.articoli, delList.articoli),
+        }));
       }
       setEditsImportText('');
       setEditsPanel(null);
@@ -420,7 +573,7 @@ function Keter() {
       };
       // 1. Legge la versione corrente del file (sha + contenuto), se esiste.
       let sha = null;
-      let remote = { lessico: {}, testi: [], articoli: [] };
+      let remote = { lessico: {}, testi: [], articoli: [], eliminati: normalizeDeletes(null) };
       const getResp = await fetch(apiUrl + '?ref=' + GH_BRANCH + '&t=' + Date.now(), { headers });
       if (getResp.status === 200) {
         const info = await getResp.json();
@@ -431,6 +584,7 @@ function Keter() {
             remote.lessico = parsed.lessico || {};
             remote.testi = Array.isArray(parsed.testi) ? parsed.testi : [];
             remote.articoli = Array.isArray(parsed.articoli) ? parsed.articoli : [];
+            remote.eliminati = normalizeDeletes(parsed.eliminati);
           }
         } catch (e) {
           // contenuto illeggibile: verrà riscritto da zero
@@ -447,10 +601,23 @@ function Keter() {
       Object.values(sessionTexts).forEach((t) => { if (t && t.id !== undefined) textMap.set(t.id, t); });
       const articleMap = new Map(remote.articoli.filter((a) => a && a.id !== undefined).map((a) => [a.id, a]));
       Object.values(sessionArticles).forEach((a) => { if (a && a.id !== undefined) articleMap.set(a.id, a); });
+      // Eliminazioni: unione remoto + sessione; un id risalvato in sessione
+      // non deve restare tra gli eliminati (l'ultima azione vince).
+      const mergedDeletes = {
+        lessico: unionIds(remote.eliminati.lessico, sessionDeletes.lessico),
+        testi: unionIds(remote.eliminati.testi, sessionDeletes.testi),
+        articoli: unionIds(remote.eliminati.articoli, sessionDeletes.articoli),
+      };
+      Object.keys(sessionEdits).forEach((id) => { mergedDeletes.lessico = removeIdFrom(mergedDeletes.lessico, id); });
+      Object.keys(sessionTexts).forEach((id) => { mergedDeletes.testi = removeIdFrom(mergedDeletes.testi, id); });
+      Object.keys(sessionArticles).forEach((id) => { mergedDeletes.articoli = removeIdFrom(mergedDeletes.articoli, id); });
+      // Coerenza del file: un id eliminato non deve comparire anche nei contenuti.
+      mergedDeletes.lessico.forEach((id) => { delete mergedLessico[id]; });
       const merged = {
         lessico: mergedLessico,
-        testi: Array.from(textMap.values()),
-        articoli: Array.from(articleMap.values()),
+        testi: filterDeleted(Array.from(textMap.values()), mergedDeletes.testi),
+        articoli: filterDeleted(Array.from(articleMap.values()), mergedDeletes.articoli),
+        eliminati: mergedDeletes,
       };
       // 3. Scrive il file aggiornato (lo crea se non esiste).
       const putResp = await fetch(apiUrl, {
@@ -474,6 +641,7 @@ function Keter() {
       setSessionEdits({});
       setSessionTexts({});
       setSessionArticles({});
+      setSessionDeletes({ lessico: [], testi: [], articoli: [] });
       setPublishState('published');
       setTimeout(() => setPublishState('idle'), 5000);
     } catch (err) {
@@ -618,11 +786,21 @@ function Keter() {
   }, [texts, textQuery, view, textBodiesIndex]);
 
   const exportPayload = useMemo(
-    () => ({ lessico: sessionEdits, testi: Object.values(sessionTexts), articoli: Object.values(sessionArticles) }),
-    [sessionEdits, sessionTexts, sessionArticles]
+    () => ({
+      lessico: sessionEdits,
+      testi: Object.values(sessionTexts),
+      articoli: Object.values(sessionArticles),
+      eliminati: sessionDeletes,
+    }),
+    [sessionEdits, sessionTexts, sessionArticles, sessionDeletes]
   );
   const pendingCount =
-    Object.keys(sessionEdits).length + Object.keys(sessionTexts).length + Object.keys(sessionArticles).length;
+    Object.keys(sessionEdits).length +
+    Object.keys(sessionTexts).length +
+    Object.keys(sessionArticles).length +
+    sessionDeletes.lessico.length +
+    sessionDeletes.testi.length +
+    sessionDeletes.articoli.length;
 
   const openText = (t, withQuery = '') => {
     setSelectedText(t);
@@ -828,6 +1006,7 @@ function Keter() {
     setTexts(updated);
     setSelectedText(saved);
     setSessionTexts((prev) => ({ ...prev, [saved.id]: saved }));
+    unrecordDelete('testi', saved.id);
     setEditingText(false);
     setTextSaveState('saving');
     // 2. window.storage best-effort.
@@ -1002,6 +1181,7 @@ function Keter() {
       setArticles(updated);
       setSelectedArticle(saved);
       setSessionArticles((prev) => ({ ...prev, [saved.id]: saved }));
+      unrecordDelete('articoli', saved.id);
       setEditingArticle(false);
       // 2. window.storage best-effort.
       let persisted = false;
@@ -1762,6 +1942,25 @@ function Keter() {
           >
             <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginBottom: 8 }}>
               {!editing ? (
+                <>
+                <button
+                  onClick={deleteEntry}
+                  style={{
+                    background: 'none',
+                    border: '1px solid #a04b3e',
+                    borderRadius: 8,
+                    color: '#e08b7d',
+                    padding: '6px 10px',
+                    fontSize: 12,
+                    fontFamily: "'Inter', sans-serif",
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 5,
+                    cursor: 'pointer',
+                  }}
+                >
+                  <X size={13} /> Elimina
+                </button>
                 <button
                   onClick={startEdit}
                   style={{
@@ -1780,6 +1979,7 @@ function Keter() {
                 >
                   <Edit3 size={13} /> Modifica
                 </button>
+                </>
               ) : (
                 <>
                   <button
@@ -2026,6 +2226,25 @@ function Keter() {
           >
             <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginBottom: 8 }}>
               {!editingArticle ? (
+                <>
+                <button
+                  onClick={deleteArticle}
+                  style={{
+                    background: 'none',
+                    border: '1px solid #a04b3e',
+                    borderRadius: 8,
+                    color: '#e08b7d',
+                    padding: '6px 10px',
+                    fontSize: 12,
+                    fontFamily: "'Inter', sans-serif",
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 5,
+                    cursor: 'pointer',
+                  }}
+                >
+                  <X size={13} /> Elimina
+                </button>
                 <button
                   onClick={startEditArticle}
                   style={{
@@ -2044,6 +2263,7 @@ function Keter() {
                 >
                   <Edit3 size={13} /> Modifica
                 </button>
+                </>
               ) : (
                 <>
                   <button
@@ -2468,6 +2688,25 @@ function Keter() {
                   </button>
                 )}
                 {!editingText ? (
+                  <>
+                  <button
+                    onClick={deleteText}
+                    style={{
+                      background: 'none',
+                      border: '1px solid #a04b3e',
+                      borderRadius: 8,
+                      color: '#e08b7d',
+                      padding: '6px 10px',
+                      fontSize: 12,
+                      fontFamily: "'Inter', sans-serif",
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 5,
+                      cursor: 'pointer',
+                    }}
+                  >
+                    <X size={13} /> Elimina
+                  </button>
                   <button
                     onClick={startEditText}
                     style={{
@@ -2486,6 +2725,7 @@ function Keter() {
                   >
                     <Edit3 size={13} /> Modifica
                   </button>
+                  </>
                 ) : (
                   <button
                     onClick={saveText}
@@ -3002,7 +3242,7 @@ function Keter() {
             ) : (
               <>
                 <div style={{ fontSize: 13, color: '#a89c81', marginBottom: 12, fontFamily: "'Inter', sans-serif", lineHeight: 1.6 }}>
-                  Le voci del lessico, i testi e gli articoli creati o modificati in questa sessione. «Pubblica su GitHub» li salva in modo permanente nel repository (file modifiche.json), rendendoli disponibili su tutti i dispositivi. In alternativa puoi copiare il JSON come copia di riserva.
+                  Le voci del lessico, i testi e gli articoli creati, modificati o eliminati in questa sessione. «Pubblica su GitHub» li salva in modo permanente nel repository (file modifiche.json), rendendoli disponibili su tutti i dispositivi. In alternativa puoi copiare il JSON come copia di riserva.
                 </div>
                 <button
                   onClick={publishToGithub}
