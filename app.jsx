@@ -29,7 +29,7 @@ function normalizeHebrew(s) {
 
 // ---------- Versione (visibile nel pannello di pubblicazione) ----------
 // Incrementare a ogni deploy per verificare che il sito serva il file nuovo.
-const KETER_VERSION = 27;
+const KETER_VERSION = 29;
 
 // ---------- Pubblicazione su GitHub ----------
 const GH_OWNER = 'pciccardini-lang';
@@ -97,6 +97,13 @@ function addUniqueId(list, id) {
 
 function removeIdFrom(list, id) {
   return list.filter((x) => String(x) !== String(id));
+}
+
+// Timestamp di inserimento di una voce, ricavato dall'id ('v-<millisecondi>').
+// Le voci del lessico di base non ce l'hanno: restano dopo, nell'ordine originale.
+function entryInsertTime(e) {
+  const m = /^v-(\d+)$/.exec(e && e.id != null ? String(e.id) : '');
+  return m ? Number(m[1]) : 0;
 }
 
 function filterDeleted(list, ids) {
@@ -294,7 +301,9 @@ function Keter() {
         return parola.includes(q) || parolaNoNiqqud.includes(qh) || trad.includes(q);
       });
     }
-    return list;
+    // Ordine cronologico inverso: le voci inserite più di recente per prime,
+    // poi il lessico di base nel suo ordine originale (sort stabile).
+    return list.slice().sort((a, b) => entryInsertTime(b) - entryInsertTime(a));
   }, [entries, query, activeTag]);
 
   const openEntry = (e) => {
@@ -1925,7 +1934,7 @@ function Keter() {
             background: '#000000cc',
             zIndex: 35,
             display: 'flex',
-            alignItems: 'flex-end',
+            alignItems: 'flex-start',
             justifyContent: 'center',
           }}
         >
@@ -1939,8 +1948,8 @@ function Keter() {
               overflowY: 'auto',
               background: '#2d5638',
               border: '1px solid #67a377',
-              borderBottom: 'none',
-              borderRadius: '18px 18px 0 0',
+              borderTop: 'none',
+              borderRadius: '0 0 18px 18px',
               padding: '20px 20px 32px',
             }}
           >
