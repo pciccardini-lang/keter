@@ -29,7 +29,7 @@ function normalizeHebrew(s) {
 
 // ---------- Versione (visibile nel pannello di pubblicazione) ----------
 // Incrementare a ogni deploy per verificare che il sito serva il file nuovo.
-const KETER_VERSION = 29;
+const KETER_VERSION = 30;
 
 // ---------- Pubblicazione su GitHub ----------
 const GH_OWNER = 'pciccardini-lang';
@@ -1632,11 +1632,11 @@ function Keter() {
                     }}
                   >
                     <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ fontSize: 18 }}>
+                      <div style={{ fontSize: 22 }}>
                         <FieldText text={e.Parola} />
                       </div>
                       {e.Traduzione && (
-                        <div style={{ fontSize: 14, color: '#a89c81', marginTop: 3 }}>
+                        <div style={{ fontSize: 16, color: '#a89c81', marginTop: 3 }}>
                           <FieldText text={e.Traduzione} />
                         </div>
                       )}
@@ -2042,7 +2042,7 @@ function Keter() {
               </button>
             </div>
 
-            <div style={{ fontSize: 26, marginBottom: 4 }}>
+            <div style={{ fontSize: 32, marginBottom: 4 }}>
               {editing ? (
                 <input
                   value={draft.Parola || ''}
@@ -2055,7 +2055,7 @@ function Keter() {
                     border: '1px solid #67a377',
                     borderRadius: 8,
                     color: '#f0e4c8',
-                    fontSize: 22,
+                    fontSize: 26,
                     padding: '8px 10px',
                     fontFamily: "'Frank Ruhl Libre', serif",
                   }}
@@ -2065,7 +2065,7 @@ function Keter() {
               )}
             </div>
 
-            <div style={{ fontSize: 17, color: '#e8b62a', marginBottom: 18 }}>
+            <div style={{ fontSize: 20, color: '#e8b62a', marginBottom: 18 }}>
               {editing ? (
                 <input
                   value={draft.Traduzione || ''}
@@ -2078,7 +2078,7 @@ function Keter() {
                     border: '1px solid #67a377',
                     borderRadius: 8,
                     color: '#ffd24d',
-                    fontSize: 15,
+                    fontSize: 17,
                     padding: '7px 10px',
                     marginTop: 6,
                     fontFamily: "'Cormorant Garamond', serif",
@@ -2125,7 +2125,7 @@ function Keter() {
                       }}
                     />
                   ) : (
-                    <div style={{ fontSize: 15, color: '#cfc4a8' }}>
+                    <div style={{ fontSize: 17, color: '#cfc4a8' }}>
                       <FieldText text={value} />
                     </div>
                   )}
