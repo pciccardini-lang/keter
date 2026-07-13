@@ -29,7 +29,7 @@ function normalizeHebrew(s) {
 
 // ---------- Versione (visibile nel pannello di pubblicazione) ----------
 // Incrementare a ogni deploy per verificare che il sito serva il file nuovo.
-const KETER_VERSION = 33;
+const KETER_VERSION = 32;
 
 // ---------- Pubblicazione su GitHub ----------
 const GH_OWNER = 'pciccardini-lang';
@@ -169,9 +169,6 @@ function Keter() {
   const [editsCopied, setEditsCopied] = useState(false);
   const [publishState, setPublishState] = useState('idle'); // idle | publishing | published | error
   const [publishError, setPublishError] = useState('');
-  const [nikkudState, setNikkudState] = useState('idle'); // idle | loading | done | error
-  const [nikkudError, setNikkudError] = useState('');
-  const [nikkudPrev, setNikkudPrev] = useState(null);
 
   const [articles, setArticles] = useState(ARTICLES_SEED);
   const [sessionArticles, setSessionArticles] = useState({});
@@ -319,88 +316,11 @@ function Keter() {
     setSelected(null);
     setEditing(false);
     setDraft(null);
-    setNikkudState('idle');
-    setNikkudError('');
-    setNikkudPrev(null);
   };
 
   const startEdit = () => {
     setDraft({ ...selected });
     setEditing(true);
-    setNikkudState('idle');
-    setNikkudError('');
-    setNikkudPrev(null);
-  };
-
-  // ---------- Suggerimento del niqqud (via API Anthropic, con approvazione) ----------
-  const suggestNikkud = async () => {
-    const word = (draft && draft.Parola ? draft.Parola : '').trim();
-    if (!word || !/[\u0590-\u05FF]/.test(word)) {
-      setNikkudState('error');
-      setNikkudError('Inserisci prima una parola ebraica nel campo.');
-      return;
-    }
-    setNikkudState('loading');
-    setNikkudError('');
-    try {
-      let apiKey = '';
-      try { apiKey = localStorage.getItem('keter-api-key') || ''; } catch (e) {}
-      if (!apiKey) {
-        apiKey = (window.prompt(
-          "Per suggerire il niqqud serve una chiave API Anthropic (inizia con sk-ant-...).\nSi crea su console.anthropic.com e verr\u00e0 salvata solo su questo dispositivo."
-        ) || '').trim();
-        if (apiKey) { try { localStorage.setItem('keter-api-key', apiKey); } catch (e) {} }
-      }
-      if (!apiKey) throw new Error('chiave API mancante');
-      const response = await fetch('https://api.anthropic.com/v1/messages', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-api-key': apiKey,
-          'anthropic-version': '2023-06-01',
-          'anthropic-dangerous-direct-browser-access': 'true',
-        },
-        body: JSON.stringify({
-          model: 'claude-sonnet-4-6',
-          max_tokens: 300,
-          messages: [
-            {
-              role: 'user',
-              content:
-                'Aggiungi il niqqud completo (vocalizzazione masoretica standard, con dagesh e punto di shin/sin) a questa voce di un dizionario ebraico. Rispondi SOLO con la voce vocalizzata, senza commenti, traduzioni o traslitterazioni. Se la voce contiene pi\u00f9 parole o varianti separate da virgola, vocalizzale tutte mantenendo la struttura. Scegli la lettura lessicografica pi\u00f9 comune. Voce: ' + word,
-            },
-          ],
-        }),
-      });
-      const data = await response.json();
-      if (data.error) {
-        if (data.error.type === 'authentication_error') {
-          try { localStorage.removeItem('keter-api-key'); } catch (e) {}
-          throw new Error('chiave API non valida: riprova, ti verr\u00e0 richiesta di nuovo');
-        }
-        throw new Error(data.error.message || 'errore API');
-      }
-      const out = (data.content || [])
-        .map((i) => (i.type === 'text' ? i.text : ''))
-        .join('')
-        .trim();
-      if (!out || !/[\u0590-\u05FF]/.test(out)) throw new Error('risposta non valida');
-      setNikkudPrev(word);
-      setDraft((d) => ({ ...d, Parola: out }));
-      setNikkudState('done');
-    } catch (err) {
-      setNikkudState('error');
-      setNikkudError('Niqqud non riuscito: ' + (err.message || 'errore sconosciuto'));
-    }
-  };
-
-  const undoNikkud = () => {
-    if (nikkudPrev !== null) {
-      setDraft((d) => ({ ...d, Parola: nikkudPrev }));
-    }
-    setNikkudPrev(null);
-    setNikkudState('idle');
-    setNikkudError('');
   };
 
   // Crea una voce nuova del Lessico, aperta direttamente in modifica.
@@ -2124,7 +2044,6 @@ function Keter() {
 
             <div style={{ fontSize: 32, marginBottom: 4 }}>
               {editing ? (
-                <>
                 <input
                   value={draft.Parola || ''}
                   onChange={(ev) => updateDraftField('Parola', ev.target.value)}
@@ -2141,47 +2060,6 @@ function Keter() {
                     fontFamily: "'Frank Ruhl Libre', serif",
                   }}
                 />
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 8 }}>
-                  <button
-                    onClick={suggestNikkud}
-                    disabled={nikkudState === 'loading'}
-                    style={{
-                      background: nikkudState === 'done' ? '#e8b62a22' : 'none',
-                      border: '1px dashed #e8b62a',
-                      borderRadius: 8,
-                      color: nikkudState === 'loading' ? '#8a7f68' : '#ffd24d',
-                      padding: '5px 10px',
-                      fontSize: 12,
-                      fontFamily: "'Inter', sans-serif",
-                      cursor: nikkudState === 'loading' ? 'wait' : 'pointer',
-                    }}
-                  >
-                    {nikkudState === 'loading' ? 'Vocalizzo\u2026' : nikkudState === 'done' ? 'Niqqud applicato \u2713' : 'Suggerisci niqqud'}
-                  </button>
-                  {nikkudPrev !== null && (
-                    <button
-                      onClick={undoNikkud}
-                      style={{
-                        background: 'none',
-                        border: '1px solid #67a377',
-                        borderRadius: 8,
-                        color: '#96c4a0',
-                        padding: '5px 10px',
-                        fontSize: 12,
-                        fontFamily: "'Inter', sans-serif",
-                        cursor: 'pointer',
-                      }}
-                    >
-                      Ripristina
-                    </button>
-                  )}
-                </div>
-                {nikkudState === 'error' && (
-                  <div style={{ fontSize: 12, color: '#c98f4b', marginTop: 6, fontFamily: "'Inter', sans-serif", lineHeight: 1.5 }}>
-                    {nikkudError}
-                  </div>
-                )}
-                </>
               ) : (
                 <FieldText text={selected.Parola} />
               )}
