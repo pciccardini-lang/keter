@@ -29,7 +29,7 @@ function normalizeHebrew(s) {
 
 // ---------- Versione (visibile nel pannello di pubblicazione) ----------
 // Incrementare a ogni deploy per verificare che il sito serva il file nuovo.
-const KETER_VERSION = 30;
+const KETER_VERSION = 32;
 
 // ---------- Pubblicazione su GitHub ----------
 const GH_OWNER = 'pciccardini-lang';
@@ -1632,11 +1632,11 @@ function Keter() {
                     }}
                   >
                     <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ fontSize: 22 }}>
+                      <div style={{ fontSize: 32, color: '#f0e4c8' }}>
                         <FieldText text={e.Parola} />
                       </div>
                       {e.Traduzione && (
-                        <div style={{ fontSize: 16, color: '#a89c81', marginTop: 3 }}>
+                        <div style={{ fontSize: 20, color: '#e8b62a', marginTop: 3 }}>
                           <FieldText text={e.Traduzione} />
                         </div>
                       )}
@@ -3158,7 +3158,7 @@ function Keter() {
                     <div dir="rtl" style={{ fontSize: 18, fontFamily: "'Frank Ruhl Libre', serif", color: '#f0e4c8', flexShrink: 0 }}>
                       {e.Parola}
                     </div>
-                    <div style={{ flex: 1, fontSize: 13, color: '#cfc4a8', fontFamily: "'Inter', sans-serif", minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    <div style={{ flex: 1, fontSize: 13, color: '#e8b62a', fontFamily: "'Inter', sans-serif", minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                       {e.Traduzione || ''}
                     </div>
                     <ChevronRight size={15} color="#96c4a0" style={{ flexShrink: 0 }} />
