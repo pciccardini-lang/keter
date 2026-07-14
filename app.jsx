@@ -29,7 +29,7 @@ function normalizeHebrew(s) {
 
 // ---------- Versione (visibile nel pannello di pubblicazione) ----------
 // Incrementare a ogni deploy per verificare che il sito serva il file nuovo.
-const KETER_VERSION = 32;
+const KETER_VERSION = 33;
 
 // ---------- Pubblicazione su GitHub ----------
 const GH_OWNER = 'pciccardini-lang';
@@ -145,6 +145,7 @@ function FieldText({ text }) {
         fontFamily: heb ? "'Frank Ruhl Libre', 'David Libre', serif" : "'Cormorant Garamond', Georgia, serif",
         whiteSpace: 'pre-wrap',
         lineHeight: 1.6,
+        textAlign: heb ? undefined : 'center',
       }}
     >
       {text}
