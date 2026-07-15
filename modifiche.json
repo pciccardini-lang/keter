@@ -1,6 +1,55 @@
 {
-  "lessico": {},
+  "lessico": {
+    "v-1783918569196": {
+      "id": "v-1783918569196",
+      "Parola": "שפה",
+      "Traduzione": "lingua ",
+      "Definizione": "",
+      "Coniugazione": "",
+      "Declinazioni": "",
+      "Esempi": "בשפה רפה malvolentieri ",
+      "Citazione": "",
+      "Tag": ""
+    },
+    "v-1783879227414": {
+      "id": "v-1783879227414",
+      "Parola": "תיכנן",
+      "Traduzione": "pianificare",
+      "Definizione": "",
+      "Coniugazione": "",
+      "Declinazioni": "",
+      "Esempi": "",
+      "Citazione": "",
+      "Tag": ""
+    },
+    "v-1783662278975": {
+      "id": "v-1783662278975",
+      "Parola": "כשרון",
+      "Traduzione": "Talento",
+      "Definizione": "",
+      "Coniugazione": "",
+      "Declinazioni": "",
+      "Esempi": "",
+      "Citazione": "",
+      "Tag": ""
+    },
+    "v-1783605726653": {
+      "id": "v-1783605726653",
+      "Parola": "מסולק",
+      "Traduzione": "1 allontanato; rimosso 2 saldato",
+      "Definizione": "",
+      "Coniugazione": "",
+      "Declinazioni": "",
+      "Esempi": "",
+      "Citazione": "",
+      "Tag": ""
+    }
+  },
   "testi": [],
   "articoli": [],
-  "eliminati": { "lessico": [], "testi": [], "articoli": [] }
+  "eliminati": {
+    "lessico": [],
+    "testi": [],
+    "articoli": []
+  }
 }
