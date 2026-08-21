@@ -132,8 +132,27 @@
 
     // ---------- Service worker per l'uso offline ----------
     if ('serviceWorker' in navigator) {
+      // Ricarica una sola volta quando un service worker nuovo prende il
+      // controllo, così i dati appena pubblicati compaiono senza intervento.
+      var keterRefreshing = false;
+      navigator.serviceWorker.addEventListener('controllerchange', function () {
+        if (keterRefreshing) return;
+        keterRefreshing = true;
+        window.location.reload();
+      });
+
       window.addEventListener('load', function () {
-        navigator.serviceWorker.register('./sw.js').catch(function () {});
+        navigator.serviceWorker
+          .register('./sw.js', { updateViaCache: 'none' })
+          .then(function (reg) {
+            reg.update();
+            // Nella PWA installata la pagina non viene ricaricata: si
+            // controllano gli aggiornamenti a ogni ritorno in primo piano.
+            document.addEventListener('visibilitychange', function () {
+              if (document.visibilityState === 'visible') reg.update();
+            });
+          })
+          .catch(function () {});
       });
     }
   </script>
